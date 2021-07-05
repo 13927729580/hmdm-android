@@ -20,8 +20,8 @@
 package com.hmdm.launcher.ui;
 
 import android.Manifest;
-import android.app.AlertDialog;
 import android.app.Dialog;
+import android.app.admin.DevicePolicyManager;
 import android.bluetooth.BluetoothAdapter;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -29,23 +29,27 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.location.LocationManager;
 import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -57,7 +61,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
-import androidx.core.content.FileProvider;
+import androidx.appcompat.app.AlertDialog;
 import androidx.databinding.DataBindingUtil;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.recyclerview.widget.GridLayoutManager;
@@ -67,6 +71,7 @@ import androidx.work.WorkManager;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
+import com.github.anrwatchdog.ANRWatchDog;
 import com.hmdm.launcher.BuildConfig;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.R;
@@ -81,10 +86,13 @@ import com.hmdm.launcher.databinding.DialogOverlaySettingsBinding;
 import com.hmdm.launcher.databinding.DialogPermissionsBinding;
 import com.hmdm.launcher.databinding.DialogSystemSettingsBinding;
 import com.hmdm.launcher.databinding.DialogUnknownSourcesBinding;
+import com.hmdm.launcher.helper.ConfigUpdater;
 import com.hmdm.launcher.helper.CryptoHelper;
 import com.hmdm.launcher.helper.SettingsHelper;
+import com.hmdm.launcher.json.Action;
 import com.hmdm.launcher.json.Application;
 import com.hmdm.launcher.json.DeviceInfo;
+import com.hmdm.launcher.json.RemoteFile;
 import com.hmdm.launcher.json.ServerConfig;
 import com.hmdm.launcher.pro.ProUtils;
 import com.hmdm.launcher.pro.service.CheckForegroundAppAccessibilityService;
@@ -92,34 +100,42 @@ import com.hmdm.launcher.pro.service.CheckForegroundApplicationService;
 import com.hmdm.launcher.pro.worker.DetailedInfoWorker;
 import com.hmdm.launcher.server.ServerService;
 import com.hmdm.launcher.server.ServerServiceKeeper;
+import com.hmdm.launcher.server.UnsafeOkHttpClient;
 import com.hmdm.launcher.service.LocationService;
 import com.hmdm.launcher.service.PluginApiService;
-import com.hmdm.launcher.task.GetRemoteLogConfigTask;
+import com.hmdm.launcher.service.StatusControlService;
 import com.hmdm.launcher.task.GetServerConfigTask;
 import com.hmdm.launcher.task.SendDeviceInfoTask;
 import com.hmdm.launcher.util.AppInfo;
+import com.hmdm.launcher.util.CrashLoopProtection;
 import com.hmdm.launcher.util.DeviceInfoProvider;
-import com.hmdm.launcher.util.PushNotificationMqttWrapper;
+import com.hmdm.launcher.util.InstallUtils;
 import com.hmdm.launcher.util.RemoteLogger;
+import com.hmdm.launcher.util.SystemUtils;
 import com.hmdm.launcher.util.Utils;
 import com.hmdm.launcher.worker.PushNotificationWorker;
+import com.jakewharton.picasso.OkHttp3Downloader;
+import com.squareup.picasso.NetworkPolicy;
 import com.squareup.picasso.Picasso;
 
+import org.apache.commons.io.FileUtils;
+
 import java.io.File;
-import java.net.URL;
-import java.util.Iterator;
-import java.util.LinkedList;
+import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.OkHttpClient;
 import okhttp3.ResponseBody;
 import retrofit2.Response;
 
 public class MainActivity
         extends BaseActivity
-        implements View.OnLongClickListener, AppListAdapter.OnAppChooseListener, View.OnClickListener {
+        implements View.OnLongClickListener, BaseAppListAdapter.OnAppChooseListener,
+        BaseAppListAdapter.SwitchAdapterListener, View.OnClickListener,
+        ConfigUpdater.UINotifier {
 
-    private static final String LOG_TAG = "HeadwindMDM";
     private static final int PERMISSIONS_REQUEST = 1000;
 
     private ActivityMainBinding binding;
@@ -157,22 +173,43 @@ public class MainActivity
 
     private Handler handler = new Handler();
     private View applicationNotAllowed;
+    private View lockScreen;
 
     private SharedPreferences preferences;
 
+    private MainAppListAdapter mainAppListAdapter;
+    private BottomAppListAdapter bottomAppListAdapter;
+    private int spanCount;
+
     private static boolean configInitialized = false;
-    private static boolean configInitializing = false;
+    // This flag is used to exit kiosk to avoid looping in onResume()
     private static boolean interruptResumeFlow = false;
-    private static List< Application > applicationsForInstall = new LinkedList();
-    private static List< Application > applicationsForRun = new LinkedList();
+    private static final int BOOT_DURATION_SEC = 120;
     private static final int PAUSE_BETWEEN_AUTORUNS_SEC = 5;
     private static final int SEND_DEVICE_INFO_PERIOD_MINS = 15;
     private static final String WORK_TAG_DEVICEINFO = "com.hmdm.launcher.WORK_TAG_DEVICEINFO";
     private boolean sendDeviceInfoScheduled = false;
+    // This flag notifies "download error" dialog what we're downloading: application or file
+    // We cannot send this flag as the method parameter because dialog calls MainActivity methods
+    private boolean downloadingFile = false;
 
     private int kioskUnlockCounter = 0;
 
     private boolean configFault = false;
+
+    private boolean needSendDeviceInfoAfterReconfigure = false;
+    private boolean needRedrawContentAfterReconfigure = false;
+
+    private int REQUEST_CODE_GPS_STATE_CHANGE = 1;
+
+    // This flag is used by the broadcast receiver to determine what to do if it gets a policy violation report
+    private boolean isBackground;
+
+    private ANRWatchDog anrWatchDog;
+
+    private int lastNetworkType;
+
+    private ConfigUpdater configUpdater = new ConfigUpdater();
 
     private BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -183,7 +220,11 @@ public class MainActivity
                     updateConfig(false);
                     break;
                 case Const.ACTION_HIDE_SCREEN:
-                    if ( applicationNotAllowed != null &&
+                    ServerConfig serverConfig = SettingsHelper.getInstance(MainActivity.this).getConfig();
+                    if (serverConfig.getLock() != null && serverConfig.getLock()) {
+                        // Device is locked by the server administrator!
+                        showLockScreen();
+                    } else if ( applicationNotAllowed != null &&
                             (!ProUtils.kioskModeRequired(MainActivity.this) || !ProUtils.isKioskAppInstalled(MainActivity.this)) ) {
                         TextView textView = ( TextView ) applicationNotAllowed.findViewById( R.id.message );
                         textView.setText( String.format( getString(R.string.access_to_app_denied),
@@ -208,6 +249,21 @@ public class MainActivity
                 case Const.ACTION_EXIT:
                     finish();
                     break;
+
+                case Const.ACTION_POLICY_VIOLATION:
+                    if (isBackground) {
+                        // If we're in the background, let's bring Headwind MDM to top and the notification will be raised in onResume
+                        Intent restoreLauncherIntent = new Intent(context, MainActivity.class);
+                        restoreLauncherIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        context.startActivity(restoreLauncherIntent);
+                    } else {
+                        // Calling startActivity always calls onPause / onResume which is not what we want
+                        // So just show dialog if it isn't already shown
+                        if (systemSettingsDialog == null || !systemSettingsDialog.isShowing()) {
+                            notifyPolicyViolation(intent.getIntExtra(Const.POLICY_VIOLATION_CAUSE, 0));
+                        }
+                    }
+                    break;
             }
 
         }
@@ -216,6 +272,23 @@ public class MainActivity
     private final BroadcastReceiver stateChangeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            // Log new connection type
+            if (intent.getAction().equals(ConnectivityManager.CONNECTIVITY_ACTION)) {
+                ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+                NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+                if (null != activeNetwork) {
+                    if (lastNetworkType != activeNetwork.getType()) {
+                        lastNetworkType = activeNetwork.getType();
+                        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Network type changed: " + activeNetwork.getTypeName());
+                    }
+                } else {
+                    if (lastNetworkType != -1) {
+                        lastNetworkType = -1;
+                        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Network connection lost");
+                    }
+                }
+            }
+
             try {
                 checkSystemSettings(settingsHelper.getConfig());
             } catch (Exception e) {
@@ -234,16 +307,27 @@ public class MainActivity
     protected void onCreate( Bundle savedInstanceState ) {
         super.onCreate( savedInstanceState );
 
+        if (CrashLoopProtection.isCrashLoopDetected(this)) {
+            Toast.makeText(MainActivity.this, R.string.fault_loop_detected, Toast.LENGTH_LONG).show();
+            return;
+        }
+
         // Disable crashes to avoid "select a launcher" popup
         // Crashlytics will show an exception anyway!
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
             @Override
             public void uncaughtException(Thread t, Throwable e) {
                 e.printStackTrace();
-                // Restart launcher if there's a launcher restarter
-                Intent intent = getPackageManager().getLaunchIntentForPackage(Const.LAUNCHER_RESTARTER_PACKAGE_ID);
-                if (intent != null) {
-                    startActivity(intent);
+
+                ProUtils.sendExceptionToCrashlytics(e);
+
+                CrashLoopProtection.registerFault(MainActivity.this);
+                // Restart launcher if there's a launcher restarter (and we're not in a crash loop)
+                if (!CrashLoopProtection.isCrashLoopDetected(MainActivity.this)) {
+                    Intent intent = getPackageManager().getLaunchIntentForPackage(Const.LAUNCHER_RESTARTER_PACKAGE_ID);
+                    if (intent != null) {
+                        startActivity(intent);
+                    }
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
                     finishAffinity();
@@ -254,6 +338,22 @@ public class MainActivity
 
         // Crashlytics is not included in the open-source version
         ProUtils.initCrashlytics(this);
+
+        if (BuildConfig.ANR_WATCHDOG) {
+            anrWatchDog = new ANRWatchDog();
+            anrWatchDog.start();
+        }
+
+        if (BuildConfig.TRUST_ANY_CERTIFICATE) {
+            InstallUtils.initUnsafeTrustManager();
+        }
+
+        Utils.lockSafeBoot(this);
+        Utils.initPasswordReset(this);
+
+        RemoteLogger.log(this, Const.LOG_INFO, "MDM Launcher " + BuildConfig.VERSION_NAME + "-" + BuildConfig.FLAVOR + " started");
+
+        InstallUtils.clearTempFiles(this);
 
         DetailedInfoWorker.schedule(MainActivity.this);
         if (BuildConfig.ENABLE_PUSH) {
@@ -267,11 +367,12 @@ public class MainActivity
         binding.setMessage( getString( R.string.main_start_preparations ) );
         binding.setLoading( true );
 
+        settingsHelper = SettingsHelper.getInstance( this );
+        preferences = getSharedPreferences( Const.PREFERENCES, MODE_PRIVATE );
+
         // Try to start services in onCreate(), this may fail, we will try again on each onResume.
         startServicesWithRetry();
 
-        settingsHelper = SettingsHelper.getInstance( this );
-        preferences = getSharedPreferences( Const.PREFERENCES, MODE_PRIVATE );
         initReceiver();
 
         IntentFilter intentFilter = new IntentFilter();
@@ -279,6 +380,12 @@ public class MainActivity
         intentFilter.addAction(WifiManager.SUPPLICANT_CONNECTION_CHANGE_ACTION);
         intentFilter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
         registerReceiver(stateChangeReceiver, intentFilter);
+
+        if (!getIntent().getBooleanExtra(Const.RESTORED_ACTIVITY, false)) {
+            startAppsAtBoot();
+        }
+
+        settingsHelper.setMainActivityRunning(true);
     }
 
     @Override
@@ -289,35 +396,38 @@ public class MainActivity
         super.onSaveInstanceState( outState );
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_CODE_GPS_STATE_CHANGE) {
+            // User changed GPS state, let's update location service
+            startLocationServiceWithRetry();
+        }
+    }
+
     private void initReceiver() {
-        IntentFilter intentFilter = new IntentFilter( Const.ACTION_UPDATE_CONFIGURATION );
-        intentFilter.addAction( Const.ACTION_HIDE_SCREEN );
-        intentFilter.addAction( Const.ACTION_EXIT );
-        LocalBroadcastManager.getInstance( this ).registerReceiver( receiver, intentFilter );
-
-        // Here we handle the completion of the silent app installation in the device owner mode
-        // For some reason, it doesn't work in a common broadcast receiver
-        registerReceiver(new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                if (intent.getAction().equals(Const.ACTION_INSTALL_COMPLETE)) {
-                    // Always grant all dangerous rights to the app
-                    // TODO: in the future, the rights must be configurable on the server
-                    String packageName = intent.getStringExtra(Const.PACKAGE_NAME);
-                    if (packageName != null) {
-                        Log.i(LOG_TAG, "Install complete: " + packageName);
-                        Utils.autoGrantRequestedPermissions(MainActivity.this, packageName);
-                    }
-                    checkAndStartLauncher();
-                }
-            }
-        }, new IntentFilter(Const.ACTION_INSTALL_COMPLETE));
-
+        IntentFilter intentFilter = new IntentFilter(Const.ACTION_UPDATE_CONFIGURATION);
+        intentFilter.addAction(Const.ACTION_HIDE_SCREEN);
+        intentFilter.addAction(Const.ACTION_EXIT);
+        intentFilter.addAction(Const.ACTION_POLICY_VIOLATION);
+        LocalBroadcastManager.getInstance(this).registerReceiver(receiver, intentFilter);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+
+        isBackground = false;
+
+        // Protection against NPE crash (why it could become null?!)
+        if (preferences == null) {
+            settingsHelper = SettingsHelper.getInstance(this);
+            preferences = getSharedPreferences(Const.PREFERENCES, MODE_PRIVATE);
+        }
+
+        // Lock orientation of progress activity to avoid hangups on rotation while initial configuration
+        setRequestedOrientation(getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT ?
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
         startServicesWithRetry();
 
@@ -326,7 +436,23 @@ public class MainActivity
             return;
         }
 
-        checkAndStartLauncher();
+        if (!BuildConfig.SYSTEM_PRIVILEGES) {
+            setDefaultLauncherEarly();
+        } else {
+            setSelfAsDeviceOwner();
+        }
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (mainAppListAdapter != null && event.getAction() == KeyEvent.ACTION_UP) {
+            if (!mainAppListAdapter.onKey(keyCode)) {
+                if (bottomAppListAdapter != null) {
+                    return bottomAppListAdapter.onKey(keyCode);
+                }
+            };
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     // Workaround against crash "App is in background" on Android 9: this is an Android OS bug
@@ -354,10 +480,91 @@ public class MainActivity
         }
     }
 
+    private void startAppsAtBoot() {
+        // Let's assume that we start within two minutes after boot
+        // This should work even for slow devices
+        long uptimeMillis = SystemClock.uptimeMillis();
+        if (uptimeMillis > BOOT_DURATION_SEC * 1000) {
+            return;
+        }
+        final ServerConfig config = settingsHelper.getConfig();
+        if (config == null || config.getApplications() == null) {
+            // First start
+            return;
+        }
+
+        new AsyncTask<Void, Void, Void>() {
+            @Override
+            protected Void doInBackground(Void... voids) {
+                boolean appStarted = false;
+                for (Application application : config.getApplications()) {
+                    if (application.isRunAtBoot()) {
+                        // Delay start of each application to 5 sec
+                        try {
+                            Thread.sleep(PAUSE_BETWEEN_AUTORUNS_SEC * 1000);
+                        } catch (InterruptedException e) {
+                        }
+                        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(application.getPkg());
+                        if (launchIntent != null) {
+                            startActivity(launchIntent);
+                            appStarted = true;
+                        }
+                    }
+                }
+                // Hide apps after start to avoid users confusion
+                if (appStarted) {
+                    try {
+                        Thread.sleep(PAUSE_BETWEEN_AUTORUNS_SEC * 1000);
+                    } catch (InterruptedException e) {
+                    }
+                    // Notice: if MainActivity will be destroyed after running multiple apps at startup,
+                    // we can get the looping here, because startActivity will create a new instance!
+                    // That's why we put a boolean extra preventing apps from start
+                    Intent intent = new Intent(MainActivity.this, MainActivity.class);
+                    intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    intent.putExtra(Const.RESTORED_ACTIVITY, true);
+                    startActivity(intent);
+                }
+
+                return null;
+            }
+        }.execute();
+
+    }
+
+    // Does not seem to work, though. See the comment to SystemUtils.becomeDeviceOwner()
+    private void setSelfAsDeviceOwner() {
+        // We set self as device owner only once
+        if (preferences.getInt(Const.PREFERENCES_DEVICE_OWNER, -1) != -1) {
+            checkAndStartLauncher();
+            return;
+        }
+
+        new AsyncTask<Void, Void, Void>() {
+            @Override
+            protected Void doInBackground(Void... voids) {
+                if (!SystemUtils.becomeDeviceOwnerByCommand(MainActivity.this)) {
+                    SystemUtils.becomeDeviceOwnerByXmlFile(MainActivity.this);
+                };
+                return null;
+            }
+
+            @Override
+            protected void onPostExecute(Void v) {
+                setDefaultLauncherEarly();
+            }
+        }.execute();
+    }
+
     private void startServices() {
         // Foreground apps checks are not available in a free version: services are the stubs
-        startService(new Intent(MainActivity.this, CheckForegroundApplicationService.class));
-        startService(new Intent(MainActivity.this, CheckForegroundAppAccessibilityService.class));
+        if (preferences.getInt(Const.PREFERENCES_USAGE_STATISTICS, Const.PREFERENCES_OFF) == Const.PREFERENCES_ON) {
+            startService(new Intent(MainActivity.this, CheckForegroundApplicationService.class));
+        }
+        if (preferences.getInt(Const.PREFERENCES_ACCESSIBILITY_SERVICE, Const.PREFERENCES_OFF) == Const.PREFERENCES_ON) {
+            startService(new Intent(MainActivity.this, CheckForegroundAppAccessibilityService.class));
+        }
+        startService(new Intent(MainActivity.this, StatusControlService.class));
 
         // Moved to onResume!
         // https://stackoverflow.com/questions/51863600/java-lang-illegalstateexception-not-allowed-to-start-service-intent-from-activ
@@ -371,6 +578,13 @@ public class MainActivity
     public void onRequestPermissionsResult(int requestCode,
                                            String[] permissions, int[] grantResults) {
         if (requestCode == PERMISSIONS_REQUEST) {
+            if (Utils.isDeviceOwner(this)) {
+                // This may be called on Android 10, not sure why; just continue the flow
+                Log.i(Const.LOG_TAG, "Called onRequestPermissionsResult: permissions=" + Arrays.toString(permissions) +
+                        ", grantResults=" + Arrays.toString(grantResults));
+                super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                return;
+            }
             boolean noPermissions = false;
             for (int n = 0; n < permissions.length; n++) {
                 if (permissions[n].equals(Manifest.permission.ACCESS_FINE_LOCATION)) {
@@ -388,6 +602,33 @@ public class MainActivity
         }
     }
 
+    private void setDefaultLauncherEarly() {
+        ServerConfig config = SettingsHelper.getInstance(this).getConfig();
+        if (config == null && Utils.isDeviceOwner(this)) {
+            // At first start, temporarily set Headwind MDM as a default launcher
+            // to prevent the user from clicking Home to stop running Headwind MDM
+            String defaultLauncher = Utils.getDefaultLauncher(this);
+
+            // As per the documentation, setting the default preferred activity should not be done on the main thread
+            new AsyncTask<Void, Void, Void>() {
+                @Override
+                protected Void doInBackground(Void... voids) {
+                    if (!getPackageName().equalsIgnoreCase(defaultLauncher)) {
+                        Utils.setDefaultLauncher(MainActivity.this);
+                    }
+                    return null;
+                }
+
+                @Override
+                protected void onPostExecute(Void v) {
+                    checkAndStartLauncher();
+                }
+            }.execute();
+            return;
+        }
+        checkAndStartLauncher();
+    }
+
     private void checkAndStartLauncher() {
 
         boolean deviceOwner = Utils.isDeviceOwner(this);
@@ -399,12 +640,36 @@ public class MainActivity
 
         int miuiPermissionMode = preferences.getInt(Const.PREFERENCES_MIUI_PERMISSIONS, -1);
         if (miuiPermissionMode == -1) {
-            if (checkMiuiPermissions()) {
-                preferences.
-                        edit().
-                        putInt( Const.PREFERENCES_MIUI_PERMISSIONS, Const.PREFERENCES_ON ).
-                        commit();
-            } else {
+            preferences.
+                    edit().
+                    putInt( Const.PREFERENCES_MIUI_PERMISSIONS, Const.PREFERENCES_ON ).
+                    commit();
+            if (checkMiuiPermissions(Const.MIUI_PERMISSIONS)) {
+                // Permissions dialog opened, break the flow!
+                return;
+            }
+        }
+
+        int miuiDeveloperMode = preferences.getInt(Const.PREFERENCES_MIUI_DEVELOPER, -1);
+        if (miuiDeveloperMode == -1) {
+            preferences.
+                    edit().
+                    putInt( Const.PREFERENCES_MIUI_DEVELOPER, Const.PREFERENCES_ON ).
+                    commit();
+            if (checkMiuiPermissions(Const.MIUI_DEVELOPER)) {
+                // Permissions dialog opened, break the flow!
+                return;
+            }
+        }
+
+        int miuiOptimizationMode = preferences.getInt(Const.PREFERENCES_MIUI_OPTIMIZATION, -1);
+        if (miuiOptimizationMode == -1) {
+            preferences.
+                    edit().
+                    putInt( Const.PREFERENCES_MIUI_OPTIMIZATION, Const.PREFERENCES_ON ).
+                    commit();
+            if (checkMiuiPermissions(Const.MIUI_OPTIMIZATION)) {
+                // Permissions dialog opened, break the flow!
                 return;
             }
         }
@@ -422,8 +687,10 @@ public class MainActivity
         }
 
         int administratorMode = preferences.getInt( Const.PREFERENCES_ADMINISTRATOR, - 1 );
+//        RemoteLogger.log(this, Const.LOG_DEBUG, "Saved device admin state: " + administratorMode);
         if ( administratorMode == -1 ) {
             if (checkAdminMode()) {
+                RemoteLogger.log(this, Const.LOG_DEBUG, "Saving device admin state as 1 (TRUE)");
                 preferences.
                         edit().
                         putInt( Const.PREFERENCES_ADMINISTRATOR, Const.PREFERENCES_ON ).
@@ -446,11 +713,17 @@ public class MainActivity
         }
 
         int usageStatisticsMode = preferences.getInt( Const.PREFERENCES_USAGE_STATISTICS, - 1 );
-        if ( usageStatisticsMode == -1 ) {
+        if (!BuildConfig.FLAVOR.equals("opensource") && usageStatisticsMode == -1) {
             if ( checkUsageStatistics() ) {
                 preferences.
                         edit().
                         putInt( Const.PREFERENCES_USAGE_STATISTICS, Const.PREFERENCES_ON ).
+                        commit();
+
+                // If usage statistics is on, there's no need to turn on accessibility services
+                preferences.
+                        edit().
+                        putInt( Const.PREFERENCES_ACCESSIBILITY_SERVICE, Const.PREFERENCES_OFF ).
                         commit();
             } else {
                 return;
@@ -458,7 +731,7 @@ public class MainActivity
         }
 
         int accessibilityService = preferences.getInt( Const.PREFERENCES_ACCESSIBILITY_SERVICE, - 1 );
-        if ( accessibilityService == -1 ) {
+        if (!BuildConfig.FLAVOR.equals("opensource") && accessibilityService == -1) {
             if ( checkAccessibilityService() ) {
                 preferences.
                         edit().
@@ -477,6 +750,7 @@ public class MainActivity
         }
 
         createApplicationNotAllowedScreen();
+        createLockScreen();
         startLauncher();
     }
 
@@ -513,6 +787,8 @@ public class MainActivity
                 R.layout.dialog_accessibility_service,
                 null,
                 false );
+        dialogAccessibilityServiceBinding.hint.setText(
+                getString(R.string.dialog_accessibility_service_message, getString(R.string.app_name)));
         accessibilityServiceDialog.setCancelable( false );
         accessibilityServiceDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
@@ -558,7 +834,8 @@ public class MainActivity
         if (ProUtils.kioskModeRequired(this) && !settingsHelper.getConfig().getMainApp().equals(getPackageName())) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
                     !Settings.canDrawOverlays( this )) {
-                Toast.makeText(this, R.string.kiosk_mode_requires_overlays, Toast.LENGTH_LONG).show();
+                Toast.makeText(this, getString(R.string.kiosk_mode_requires_overlays,
+                        getString(R.string.app_name)), Toast.LENGTH_LONG).show();
                 config.setKioskMode(false);
                 settingsHelper.updateConfig(config);
                 createLauncherButtons();
@@ -572,9 +849,9 @@ public class MainActivity
                     if (kioskUnlockCounter >= Const.KIOSK_UNLOCK_CLICK_COUNT ) {
                         // We are in the main app: let's open launcher activity
                         interruptResumeFlow = true;
-                        Intent restoreLauncherIntent = new Intent( MainActivity.this, MainActivity.class );
-                        restoreLauncherIntent.addFlags( Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT );
-                        startActivity( restoreLauncherIntent );
+                        Intent restoreLauncherIntent = new Intent(MainActivity.this, MainActivity.class);
+                        restoreLauncherIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                        startActivity(restoreLauncherIntent);
                         createAndShowEnterPasswordDialog();
                         kioskUnlockCounter = 0;
                     }
@@ -588,29 +865,32 @@ public class MainActivity
     private void startLauncher() {
         createButtons();
 
-        if ( applicationsForInstall.size() > 0 ) {
-            loadAndInstallApplications();
+        if (configUpdater.isPendingAppInstall()) {
+            // Here we go after completing the user confirmed app installation
+            configUpdater.repeatDownloadApps();
         } else if ( !checkPermissions(true)) {
             // Permissions are requested inside checkPermissions, so do nothing here
-            Log.i(LOG_TAG, "startLauncher: requesting permissions");
-        } else if (!Utils.isDeviceOwner(this) && !settingsHelper.isBaseUrlSet() &&
-                (BuildConfig.FLAVOR.equals("master") || BuildConfig.FLAVOR.equals("opensource"))) {
+            Log.i(Const.LOG_TAG, "startLauncher: requesting permissions");
+        } else if (!Utils.isDeviceOwner(this) && !settingsHelper.isBaseUrlSet() && BuildConfig.REQUEST_SERVER_URL) {
             // For common public version, here's an option to change the server in non-MDM mode
             createAndShowServerDialog(false, settingsHelper.getBaseUrl(), settingsHelper.getServerProject());
         } else if ( settingsHelper.getDeviceId().length() == 0 ) {
-            createAndShowEnterDeviceIdDialog( false, null );
+            if (!SystemUtils.autoSetDeviceId(this)) {
+                createAndShowEnterDeviceIdDialog(false, null);
+            } else {
+                // Retry after automatical setting of device ID
+                // We shouldn't get looping here because autoSetDeviceId cannot return true if deviceId.length == 0
+                startLauncher();
+            }
         } else if ( ! configInitialized ) {
-            Log.i(LOG_TAG, "Updating configuration in startLauncher()");
+            Log.i(Const.LOG_TAG, "Updating configuration in startLauncher()");
             if (settingsHelper.getConfig() != null) {
                 // If it's not the first start, let's update in the background, show the content first!
                 showContent(settingsHelper.getConfig());
             }
             updateConfig( false );
-        } else if ( ! configInitializing ) {
-            Log.i(LOG_TAG, "Showing content");
-            showContent( settingsHelper.getConfig() );
         } else {
-            Log.i(LOG_TAG, "Do nothing in startLauncher: configInitializing=true");
+            showContent(settingsHelper.getConfig());
         }
     }
 
@@ -640,14 +920,16 @@ public class MainActivity
         }
     }
 
-    private boolean checkMiuiPermissions() {
+    private boolean checkMiuiPermissions(int screen) {
         // Permissions to open popup from background first appears in MIUI 11 (Android 9)
+        // Also a workaround against https://qa.h-mdm.com/3119/
         if (Utils.isMiui(this) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            createAndShowMiuiPermissionsDialog();
-            // It is not known how to check this permission programmatically, so return true
+            LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_ENABLE_SETTINGS));
+            createAndShowMiuiPermissionsDialog(screen);
+            // It is not known how to check this setting programmatically, so return true
             return true;
         }
-        return true;
+        return false;
     }
 
     private boolean checkUnknownSources() {
@@ -659,21 +941,24 @@ public class MainActivity
         }
     }
 
+    private WindowManager.LayoutParams overlayLockScreenParams() {
+        WindowManager.LayoutParams layoutParams = new WindowManager.LayoutParams();
+        layoutParams.type = Utils.OverlayWindowType();
+        layoutParams.gravity = Gravity.RIGHT;
+        layoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+
+        layoutParams.height = WindowManager.LayoutParams.MATCH_PARENT;
+        layoutParams.width = WindowManager.LayoutParams.MATCH_PARENT;
+        layoutParams.format = PixelFormat.TRANSPARENT;
+
+        return layoutParams;
+    }
+
     private void createApplicationNotAllowedScreen() {
         if ( applicationNotAllowed != null ) {
             return;
         }
-
         WindowManager manager = ((WindowManager)getApplicationContext().getSystemService(Context.WINDOW_SERVICE));
-
-        WindowManager.LayoutParams localLayoutParams = new WindowManager.LayoutParams();
-        localLayoutParams.type = Utils.OverlayWindowType();
-        localLayoutParams.gravity = Gravity.RIGHT;
-        localLayoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-
-        localLayoutParams.height = WindowManager.LayoutParams.MATCH_PARENT;
-        localLayoutParams.width = WindowManager.LayoutParams.MATCH_PARENT;
-        localLayoutParams.format = PixelFormat.TRANSPARENT;
 
         applicationNotAllowed = LayoutInflater.from( this ).inflate( R.layout.layout_application_not_allowed, null );
         applicationNotAllowed.findViewById( R.id.layout_application_not_allowed_continue ).setOnClickListener( new View.OnClickListener() {
@@ -693,46 +978,48 @@ public class MainActivity
         applicationNotAllowed.setVisibility( View.GONE );
 
         try {
-            manager.addView( applicationNotAllowed, localLayoutParams );
-        } catch ( Exception e ) { e.printStackTrace(); }
+            manager.addView( applicationNotAllowed, overlayLockScreenParams() );
+        } catch ( Exception e ) {
+            // No permission to show overlays; let's try to add view to main view
+            try {
+                RelativeLayout root = findViewById(R.id.activity_main);
+                root.addView(applicationNotAllowed);
+            } catch ( Exception e1 ) {
+                e1.printStackTrace();
+            }
+        }
     }
 
-    // This is an overlay button which is not necessary! We need normal buttons in the launcher window.
-    /*private ImageView createManageButton(int imageResource, int imageResourceBlack, int offset) {
-        WindowManager manager = ((WindowManager)getApplicationContext().getSystemService(Context.WINDOW_SERVICE));
-
-        WindowManager.LayoutParams localLayoutParams = new WindowManager.LayoutParams();
-        localLayoutParams.type = Utils.OverlayWindowType();
-        localLayoutParams.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-        localLayoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-
-        localLayoutParams.height = getResources().getDimensionPixelOffset( R.dimen.activity_main_exit_button_size );
-        localLayoutParams.width = getResources().getDimensionPixelOffset( R.dimen.activity_main_exit_button_size );
-        localLayoutParams.format = PixelFormat.TRANSPARENT;
-        localLayoutParams.y = offset;
-
-        boolean dark = true;
-        try {
-            ServerConfig config = settingsHelper.getConfig();
-            if (config.getBackgroundColor() != null) {
-                int color = Color.parseColor(config.getBackgroundColor());
-                dark = !Utils.isLightColor(color);
-            }
-        } catch (Exception e) {
+    private void createLockScreen() {
+        if ( lockScreen != null ) {
+            return;
         }
 
-        ImageView manageButton = new ImageView( this );
-        manageButton.setImageResource(dark ? imageResource : imageResourceBlack);
-
-        try {
-            manager.addView( manageButton, localLayoutParams );
-        } catch ( Exception e ) { e.printStackTrace(); }
-        return manageButton;
-    } */
-
-    private ImageView createManageButton(int imageResource, int imageResourceBlack, int offset) {
         WindowManager manager = ((WindowManager)getApplicationContext().getSystemService(Context.WINDOW_SERVICE));
 
+        // Reuse existing "Application not allowed" screen but hide buttons
+        lockScreen = LayoutInflater.from( this ).inflate( R.layout.layout_application_not_allowed, null );
+        lockScreen.findViewById( R.id.layout_application_not_allowed_continue ).setVisibility(View.GONE);
+        lockScreen.findViewById( R.id.layout_application_not_allowed_admin ).setVisibility(View.GONE);
+        TextView textView = lockScreen.findViewById( R.id.message );
+        textView.setText(getString(R.string.device_locked));
+
+        lockScreen.setVisibility( View.GONE );
+
+        try {
+            manager.addView( lockScreen, overlayLockScreenParams() );
+        } catch ( Exception e ) {
+            // No permission to show overlays; let's try to add view to main view
+            try {
+                RelativeLayout root = findViewById(R.id.activity_main);
+                root.addView(lockScreen);
+            } catch ( Exception e1 ) {
+                e1.printStackTrace();
+            }
+        }
+    }
+
+    private ImageView createManageButton(int imageResource, int imageResourceBlack, int offset) {
         RelativeLayout.LayoutParams layoutParams = new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         layoutParams.addRule(RelativeLayout.CENTER_VERTICAL);
         layoutParams.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
@@ -747,9 +1034,15 @@ public class MainActivity
         } catch (Exception e) {
         }
 
+        int offsetRight = 0;
+        if (settingsHelper != null && settingsHelper.getConfig() != null && settingsHelper.getConfig().getLockStatusBar() != null && settingsHelper.getConfig().getLockStatusBar()) {
+            // If we lock the right bar, let's shift buttons to avoid overlapping
+            offsetRight = getResources().getDimensionPixelOffset(R.dimen.prevent_applications_list_width);
+        }
+
         RelativeLayout view = new RelativeLayout(this);
         // Offset is multiplied by 2 because the view is centered. Yeah I know its an Induism)
-        view.setPadding(0, offset * 2, 0, 0);
+        view.setPadding(0, offset * 2, offsetRight, 0);
         view.setLayoutParams(layoutParams);
 
         ImageView manageButton = new ImageView( this );
@@ -789,115 +1082,10 @@ public class MainActivity
         updateView.setOnClickListener(this);
     }
 
-    private void updateConfig( final boolean force ) {
-        if ( configInitializing ) {
-            Log.i(LOG_TAG, "updateConfig(): configInitializing=true, exiting");
-            return;
-        }
-
-        Log.i(LOG_TAG, "updateConfig(): set configInitializing=true");
-        configInitializing = true;
-        DetailedInfoWorker.requestConfigUpdate(this);
-
-        binding.setMessage( getString( R.string.main_activity_update_config ) );
-        GetServerConfigTask task = new GetServerConfigTask( this ) {
-            @Override
-            protected void onPostExecute( Integer result ) {
-                super.onPostExecute( result );
-                configInitializing = false;
-                Log.i(LOG_TAG, "updateConfig(): set configInitializing=false after getting config");
-
-                switch ( result ) {
-                    case Const.TASK_SUCCESS:
-                        updateRemoteLogConfig();
-                        break;
-                    case Const.TASK_ERROR:
-                        if ( enterDeviceIdDialog != null ) {
-                            enterDeviceIdDialogBinding.setError( true );
-                            enterDeviceIdDialog.show();
-                        } else {
-                            createAndShowEnterDeviceIdDialog( true, settingsHelper.getDeviceId() );
-                        }
-                        break;
-                    case Const.TASK_NETWORK_ERROR:
-                        if ( settingsHelper.getConfig() != null && !force ) {
-                            updateRemoteLogConfig();
-                        } else {
-                            createAndShowNetworkErrorDialog();
-                        }
-                        break;
-                }
-            }
-        };
-        task.execute();
-    }
-
-    private void updateRemoteLogConfig() {
-        Log.i(LOG_TAG, "updateRemoteLogConfig(): get logging configuration");
-
-        GetRemoteLogConfigTask task = new GetRemoteLogConfigTask( this ) {
-            @Override
-            protected void onPostExecute( Integer result ) {
-                super.onPostExecute( result );
-                Log.i(LOG_TAG, "updateRemoteLogConfig(): result=" + result);
-                setupPushService();
-            }
-        };
-        task.execute();
-    }
-
-    private void setupPushService() {
-        String pushOptions = null;
-        if (settingsHelper != null && settingsHelper.getConfig() != null) {
-            pushOptions = settingsHelper.getConfig().getPushOptions();
-        }
-        if (BuildConfig.ENABLE_PUSH && pushOptions != null && (pushOptions.equals(ServerConfig.PUSH_OPTIONS_MQTT_WORKER)
-                || pushOptions.equals(ServerConfig.PUSH_OPTIONS_MQTT_ALARM))) {
-            try {
-                URL url = new URL(settingsHelper.getBaseUrl());
-                Runnable nextRunnable = new Runnable() {
-                    @Override
-                    public void run() {
-                        checkFactoryReset();
-                    }
-                };
-                PushNotificationMqttWrapper.getInstance().connect(this, url.getHost(), BuildConfig.MQTT_PORT,
-                        pushOptions, settingsHelper.getDeviceId(), nextRunnable, nextRunnable);
-            } catch (Exception e) {
-                e.printStackTrace();
-                checkFactoryReset();
-            }
-        } else {
-            checkFactoryReset();
-        }
-    }
-
-    private void checkFactoryReset() {
-        ServerConfig config = settingsHelper.getConfig();
-        if (config.getFactoryReset() != null && config.getFactoryReset()) {
-            // We got a factory reset request, let's confirm and erase everything!
-            SendDeviceInfoTask confirmTask = new SendDeviceInfoTask(this) {
-                @Override
-                protected void onPostExecute( Integer result ) {
-                    // Do a factory reset if we can
-                    if (Utils.checkAdminMode(MainActivity.this)) {
-                        Utils.factoryReset(MainActivity.this);
-                    }
-                }
-            };
-
-            DeviceInfo deviceInfo = DeviceInfoProvider.getDeviceInfo(this, true, true);
-            deviceInfo.setFactoryReset(Utils.checkAdminMode(this));
-            confirmTask.execute(deviceInfo);
-
-        } else {
-            updateLocationService();
-        }
-    }
-
-    private void updateLocationService() {
-        startLocationServiceWithRetry();
-        checkAndUpdateApplications();
+    private void updateConfig( final boolean forceShowErrorDialog ) {
+        needSendDeviceInfoAfterReconfigure = true;
+        needRedrawContentAfterReconfigure = true;
+        configUpdater.updateConfig(this, this, forceShowErrorDialog);
     }
 
     // Workaround against crash "App is in background" on Android 9: this is an Android OS bug
@@ -930,360 +1118,159 @@ public class MainActivity
         startService(intent);
     }
 
-    private void checkAndUpdateApplications() {
-        Log.i(LOG_TAG, "checkAndUpdateApplications(): starting update applications");
-        binding.setMessage( getString( R.string.main_activity_applications_update ) );
-
-        configInitialized = true;
-        configInitializing = false;
-
-        ServerConfig config = settingsHelper.getConfig();
-        generateApplicationsForInstallList( config.getApplications() );
-
-        Log.i(LOG_TAG, "checkAndUpdateApplications(): list size=" + applicationsForInstall.size());
-
-        loadAndInstallApplications();
+    @Override
+    public void onConfigUpdateStart() {
+        binding.setMessage( getString( R.string.main_activity_update_config ) );
     }
 
-    private void generateApplicationsForInstallList( List< Application > applications ) {
-        PackageManager packageManager = getPackageManager();
-
-        // First handle apps to be removed, then apps to be installed
-        // We process only applications of type "app" (default) and skip web links and others
-        for (Application a : applications) {
-            if ((a.getType() == null || a.getType().equals(Application.TYPE_APP)) && a.isRemove()) {
-                applicationsForInstall.add(a);
-            }
-        }
-        for (Application a : applications) {
-            if ((a.getType() == null || a.getType().equals(Application.TYPE_APP)) && !a.isRemove()) {
-                applicationsForInstall.add(a);
-            }
-        }
-        Iterator< Application > it = applicationsForInstall.iterator();
-
-        while ( it.hasNext() ) {
-            Application application = it.next();
-            if ( (application.getUrl() == null || application.getUrl().trim().equals("")) && !application.isRemove() ) {
-                // An app without URL is a system app which doesn't require installation
-                it.remove();
-                continue;
-            }
-
-            try {
-                PackageInfo packageInfo = packageManager.getPackageInfo( application.getPkg(), 0 );
-
-                if (application.isRemove() && !application.getVersion().equals("0") &&
-                        !areVersionsEqual(packageInfo.versionName, application.getVersion())) {
-                    // If a removal is required, but the app version doesn't match, do not remove
-                    it.remove();
-                    continue;
-                }
-
-                if (!application.isRemove() &&
-                        (application.isSkipVersion() || application.getVersion().equals("0") || areVersionsEqual(packageInfo.versionName, application.getVersion()))) {
-                    // If installation is required, but the app of the same version already installed, do not install
-                    it.remove();
-                    continue;
-                }
-            } catch ( PackageManager.NameNotFoundException e ) {
-                // The app isn't installed, let's keep it in the "To be installed" list
-                if (application.isRemove()) {
-                    // The app requires removal but already removed, remove from the list so do nothing with the app
-                    it.remove();
-                    continue;
-                }
-            }
-        }
-    }
-
-    private boolean areVersionsEqual(String v1, String v2) {
-        // Compare only digits (in Android 9 EMUI on Huawei Honor 8A, getPackageInfo doesn't get letters!)
-        String v1d = v1.replaceAll("[^\\d.]", "");
-        String v2d = v2.replaceAll("[^\\d.]", "");
-        return v1d.equals(v2d);
-    }
-
-    private class ApplicationStatus {
-        public Application application;
-        public boolean installed;
-    }
-
-    // Here we avoid ConcurrentModificationException by executing all operations with applicationForInstall list in a main thread
-    private void loadAndInstallApplications() {
-        if ( applicationsForInstall.size() > 0 ) {
-            Application application = applicationsForInstall.remove(0);
-
-            new AsyncTask<Application, Void, ApplicationStatus>() {
-
-                @Override
-                protected ApplicationStatus doInBackground(Application... applications) {
-                    final Application application = applications[0];
-                    ApplicationStatus applicationStatus = null;
-
-                    if (application.isRemove()) {
-                        // Remove the app
-                        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Removing app: " + application.getPkg());
-                        updateMessageForApplicationRemoving( application.getName() );
-                        uninstallApplication(application.getPkg());
-
-                    } else if ( application.getUrl() != null && !application.getUrl().startsWith("market://details") ) {
-                        updateMessageForApplicationDownloading(application.getName());
-
-                        File file = null;
-                        try {
-                            RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Downloading app: " + application.getPkg());
-                            file = Utils.downloadApplication(application.getUrl(),
-                                    new Utils.DownloadApplicationProgress() {
-                                        @Override
-                                        public void onDownloadProgress(final int progress, final long total, final long current) {
-                                            handler.post(new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    binding.progress.setMax(100);
-                                                    binding.progress.setProgress(progress);
-
-                                                    binding.setFileLength(total);
-                                                    binding.setDownloadedLength(current);
-                                                }
-                                            });
-                                        }
-                                    });
-                        } catch (Exception e) {
-                            RemoteLogger.log(MainActivity.this, Const.LOG_WARN, "Failed to download app " + application.getPkg() + ": " + e.getMessage());
-                            e.printStackTrace();
-                        }
-
-                        applicationStatus = new ApplicationStatus();
-                        applicationStatus.application = application;
-                        if (file != null) {
-                            updateMessageForApplicationInstalling(application.getName());
-                            installApplication(file, application.getPkg());
-                            applicationStatus.installed = true;
-                        } else {
-                            applicationStatus.installed = false;
-                        }
-                    } else if (application.getUrl().startsWith("market://details")) {
-                        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Installing app " + application.getPkg() + " from Google Play");
-                        installApplicationFromPlayMarket(application.getUrl(), application.getPkg());
-                        applicationStatus = new ApplicationStatus();
-                        applicationStatus.application = application;
-                        applicationStatus.installed = true;
-                    } else {
-                        handler.post( new Runnable() {
-                            @Override
-                            public void run() {
-                                Log.i(LOG_TAG, "loadAndInstallApplications(): proceed to next app");
-                                loadAndInstallApplications();
-                            }
-                        } );
-                    }
-
-                    return applicationStatus;
-                }
-
-                @Override
-                protected void onPostExecute(ApplicationStatus applicationStatus) {
-                    if (applicationStatus != null) {
-                        if (applicationStatus.installed) {
-                            if (applicationStatus.application.isRunAfterInstall()) {
-                                applicationsForRun.add(applicationStatus.application);
-                            }
-                        } else {
-                            applicationsForInstall.add( 0, applicationStatus.application );
-                            if (!ProUtils.kioskModeRequired(MainActivity.this)) {
-                                createAndShowFileNotDownloadedDialog(applicationStatus.application);
-                                binding.setDownloading( false );
-                            } else {
-                                // Avoid user interaction in kiosk mode, just ignore download error and keep the old version
-                                // Note: view is not used in this method so just pass null there
-                                confirmDownloadFailureClicked(null);
-                            }
-                        }
-                    }
-                }
-
-            }.execute(application);
+    @Override
+    public void onConfigUpdateServerError() {
+        if ( enterDeviceIdDialog != null ) {
+            enterDeviceIdDialogBinding.setError( true );
+            enterDeviceIdDialog.show();
         } else {
-            Log.i(LOG_TAG, "Showing content from loadAndInstallApplications()");
-            showContent( settingsHelper.getConfig() );
-        }
-
-        /*
-                AsyncTask.execute( new Runnable() {
-            @Override
-            public void run() {
-                if ( applicationsForInstall.size() > 0 ) {
-                    final Application application = applicationsForInstall.remove( 0 );
-
-                    if (application.isRemove()) {
-                        // Remove the app
-                        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Removing app: " + application.getPkg());
-                        Log.i(LOG_TAG, "loadAndInstallApplications(): remove app " + application.getPkg());
-                        updateMessageForApplicationRemoving( application.getName() );
-                        uninstallApplication(application.getPkg());
-
-                    } else if ( application.getUrl() != null ) {
-                        updateMessageForApplicationDownloading( application.getName() );
-
-                        File file = null;
-                        try {
-                            RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Downloading app: " + application.getPkg());
-                            Log.i(LOG_TAG, "loadAndInstallApplications(): downloading app " + application.getPkg());
-                            file = Utils.downloadApplication(application.getUrl(),
-                                    new Utils.DownloadApplicationProgress() {
-                                        @Override
-                                        public void onDownloadProgress(final int progress, final long total, final long current) {
-                                                handler.post( new Runnable() {
-                                                    @Override
-                                                    public void run() {
-                                                        binding.progress.setMax( 100 );
-                                                        binding.progress.setProgress( progress );
-
-                                                        binding.setFileLength( total );
-                                                        binding.setDownloadedLength( current );
-                                                    }
-                                                } );
-                                            }
-                                    });
-                        } catch ( Exception e ) {
-                            RemoteLogger.log(MainActivity.this, Const.LOG_WARN, "Failed to download app " + application.getPkg() + ": " + e.getMessage());
-                            Log.i(LOG_TAG, "loadAndInstallApplications(): failed to download app " + application.getPkg() + ": " + e.getMessage());
-                            e.printStackTrace();
-                        }
-
-                        if ( file != null ) {
-                            updateMessageForApplicationInstalling( application.getName() );
-                            installApplication( file, application.getPkg() );
-                            if (application.isRunAfterInstall()) {
-                                applicationsForRun.add(application);
-                            }
-                        } else {
-                            applicationsForInstall.add( 0, application );
-                            handler.post( new Runnable() {
-                                @Override
-                                public void run() {
-                                    createAndShowFileNotDownloadedDialog( application );
-                                    binding.setDownloading( false );
-                                }
-                            } );
-                        }
-                    } else {
-                        handler.post( new Runnable() {
-                            @Override
-                            public void run() {
-                                Log.i(LOG_TAG, "loadAndInstallApplications(): proceed to next app");
-                                loadAndInstallApplications();
-                            }
-                        } );
-                    }
-                } else {
-                    handler.post( new Runnable() {
-                        @Override
-                        public void run() {
-                            Log.i(LOG_TAG, "Showing content from loadAndInstallApplications()");
-                            showContent( settingsHelper.getConfig() );
-                        }
-                    } );
-                }
-            }
-        } );
-
-         */
-    }
-
-    private void installApplicationFromPlayMarket(final String uri, final String packageName) {
-        RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Asking user to install app " + packageName);
-        Intent intent = new Intent(Intent.ACTION_VIEW);
-        intent.setData(Uri.parse(uri));
-        startActivity(intent);
-    }
-
-    // This function is called from a background thread
-    private void installApplication( File file, final String packageName ) {
-        if (packageName.equals(getPackageName()) &&
-                getPackageManager().getLaunchIntentForPackage(Const.LAUNCHER_RESTARTER_PACKAGE_ID) != null) {
-            // Restart self in EMUI: there's no auto restart after update in EMUI, we must use a helper app
-            startLauncherRestarter();
-        }
-        if (Utils.isDeviceOwner(this)) {
-                RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Silently installing app " + packageName);
-                Utils.silentInstallApplication(this, file, packageName, new Utils.SilentInstallErrorHandler() {
-                    @Override
-                    public void onInstallError() {
-                        Log.i(LOG_TAG, "installApplication(): error installing app " + packageName);
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                new AlertDialog.Builder(MainActivity.this)
-                                    .setMessage(getString(R.string.install_error) + " " + packageName)
-                                    .setPositiveButton(R.string.dialog_administrator_mode_continue, new DialogInterface.OnClickListener() {
-                                        @Override
-                                        public void onClick(DialogInterface dialog, int which) {
-                                            checkAndStartLauncher();
-                                        }
-                                    })
-                                    .create()
-                                    .show();
-                            }
-                        });
-                    }
-                });
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Asking user to install app " + packageName);
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            Uri uri = FileProvider.getUriForFile( this,
-                    getApplicationContext().getPackageName() + ".provider",
-                    file );
-            intent.setDataAndType( uri, "application/vnd.android.package-archive" );
-            intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(intent);
-        } else {
-                RemoteLogger.log(MainActivity.this, Const.LOG_DEBUG, "Asking user to install app " + packageName);
-            Uri apkUri = Uri.fromFile( file );
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-        }
-
-    }
-
-    private void uninstallApplication(final String packageName) {
-        if (Utils.isDeviceOwner(this)) {
-            Utils.silentUninstallApplication(this, packageName);
-        } else {
-            Uri packageUri = Uri.parse("package:" + packageName);
-            startActivity(new Intent(Intent.ACTION_UNINSTALL_PACKAGE, packageUri));
+            createAndShowEnterDeviceIdDialog( true, settingsHelper.getDeviceId() );
         }
     }
 
-    private void updateMessageForApplicationInstalling( final String name ) {
+    @Override
+    public void onConfigUpdateNetworkError() {
+        if (ProUtils.isKioskModeRunning(this)) {
+            interruptResumeFlow = true;
+            Intent restoreLauncherIntent = new Intent(MainActivity.this, MainActivity.class);
+            restoreLauncherIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(restoreLauncherIntent);
+        }
+        // Do not show the reset button if the launcher is installed by scanning a QR code
+        // Only show the reset button on manual setup at first start (when config is not yet loaded)
+        createAndShowNetworkErrorDialog(settingsHelper.getBaseUrl(), settingsHelper.getServerProject(),
+                settingsHelper.getConfig() == null && !settingsHelper.isQrProvisioning(),
+                settingsHelper.getConfig() != null && settingsHelper.getConfig().isShowWifi());
+    }
+
+    @Override
+    public void onPoliciesUpdated() {
+        startLocationServiceWithRetry();
+    }
+
+    @Override
+    public void onFileDownloading(RemoteFile remoteFile) {
         handler.post( new Runnable() {
             @Override
             public void run() {
-                binding.setMessage( getString(R.string.main_app_installing) + " " + name );
-                binding.setDownloading( false );
-            }
-        } );
-    }
-
-    private void updateMessageForApplicationDownloading( final String name ) {
-        handler.post( new Runnable() {
-            @Override
-            public void run() {
-                binding.setMessage( getString(R.string.main_app_downloading) + " " + name );
+                binding.setMessage(getString(R.string.main_file_downloading) + " " + remoteFile.getPath());
                 binding.setDownloading( true );
             }
         } );
     }
 
-    private void updateMessageForApplicationRemoving( final String name ) {
+    @Override
+    public void onDownloadProgress(final int progress, final long total, final long current) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                binding.progress.setMax(100);
+                binding.progress.setProgress(progress);
+
+                binding.setFileLength(total);
+                binding.setDownloadedLength(current);
+            }
+        });
+    }
+
+    @Override
+    public void onFileDownloadError(RemoteFile remoteFile) {
+        if (!ProUtils.kioskModeRequired(this)) {
+            // Notify the error dialog that we're downloading a file, not an app
+            downloadingFile = true;
+            createAndShowFileNotDownloadedDialog(remoteFile.getUrl());
+            binding.setDownloading( false );
+        } else {
+            // Avoid user interaction in kiosk mode, just ignore download error and keep the old version
+            // Note: view is not used in this method so just pass null there
+            confirmDownloadFailureClicked(null);
+        }
+    }
+
+    @Override
+    public void onAppUpdateStart() {
+        binding.setMessage( getString( R.string.main_activity_applications_update ) );
+        configInitialized = true;
+    }
+
+    @Override
+    public void onAppInstalling(final Application application) {
         handler.post( new Runnable() {
             @Override
             public void run() {
-                binding.setMessage( getString(R.string.main_app_removing) + " " + name );
+                binding.setMessage(getString(R.string.main_app_installing) + " " + application.getName());
                 binding.setDownloading( false );
+            }
+        } );
+    }
+
+    @Override
+    public void onAppDownloadError(Application application) {
+        if (!ProUtils.kioskModeRequired(MainActivity.this)) {
+            // Notify the error dialog that we're downloading an app
+            downloadingFile = false;
+            createAndShowFileNotDownloadedDialog(application.getName());
+            binding.setDownloading( false );
+        } else {
+            // Avoid user interaction in kiosk mode, just ignore download error and keep the old version
+            // Note: view is not used in this method so just pass null there
+            confirmDownloadFailureClicked(null);
+        }
+    }
+
+    @Override
+    public void onAppInstallError(String packageName) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(getString(R.string.install_error) + " " + packageName)
+                        .setPositiveButton(R.string.dialog_administrator_mode_continue, new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                configUpdater.repeatDownloadApps();
+                            }
+                        })
+                        .create()
+                        .show();
+            }
+        });
+    }
+
+    @Override
+    public void onAppInstallComplete(String packageName) {
+
+    }
+
+    @Override
+    public void onConfigUpdateComplete() {
+        Log.i(Const.LOG_TAG, "Showing content from setActions()");
+        showContent(settingsHelper.getConfig());
+    }
+
+    @Override
+    public void onAppDownloading(final Application application) {
+        handler.post( new Runnable() {
+            @Override
+            public void run() {
+                binding.setMessage(getString(R.string.main_app_downloading) + " " + application.getName());
+                binding.setDownloading(true);
+            }
+        } );
+    }
+
+    @Override
+    public void onAppRemoving(final Application application) {
+        handler.post( new Runnable() {
+            @Override
+            public void run() {
+                binding.setMessage(getString(R.string.main_app_removing) + " " + application.getName());
+                binding.setDownloading(false);
             }
         } );
     }
@@ -1296,26 +1283,38 @@ public class MainActivity
         }
 
         if (config.getBluetooth() != null) {
-            BluetoothAdapter bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-            if (bluetoothAdapter != null) {
-                boolean enabled = bluetoothAdapter.isEnabled();
-                if (config.getBluetooth() && !enabled) {
-                    bluetoothAdapter.enable();
-                } else if (!config.getBluetooth() && enabled) {
-                    bluetoothAdapter.disable();
+            try {
+                BluetoothAdapter bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+                if (bluetoothAdapter != null) {
+                    boolean enabled = bluetoothAdapter.isEnabled();
+                    if (config.getBluetooth() && !enabled) {
+                        bluetoothAdapter.enable();
+                    } else if (!config.getBluetooth() && enabled) {
+                        bluetoothAdapter.disable();
+                    }
                 }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         }
 
+        // Note: SecurityException here on Mediatek
+        // Looks like com.mediatek.permission.CTA_ENABLE_WIFI needs to be explicitly granted
+        // or even available to system apps only
+        // By now, let's just ignore this issue
         if (config.getWifi() != null) {
-            WifiManager wifiManager = (WifiManager) this.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if (wifiManager != null) {
-                boolean enabled = wifiManager.isWifiEnabled();
-                if (config.getWifi() && !enabled) {
-                    wifiManager.setWifiEnabled(true);
-                } else if (!config.getWifi() && enabled) {
-                    wifiManager.setWifiEnabled(false);
+            try {
+                WifiManager wifiManager = (WifiManager) this.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wifiManager != null) {
+                    boolean enabled = wifiManager.isWifiEnabled();
+                    if (config.getWifi() && !enabled) {
+                        wifiManager.setWifiEnabled(true);
+                    } else if (!config.getWifi() && enabled) {
+                        wifiManager.setWifiEnabled(false);
+                    }
                 }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         }
 
@@ -1328,11 +1327,14 @@ public class MainActivity
                 boolean enabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
                 if (config.getGps() && !enabled) {
                     dialogWillShow = true;
-                    postDelayedSystemSettingDialog(getString(R.string.message_turn_on_gps), new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                    // System settings dialog should return result so we could re-initialize location service
+                    postDelayedSystemSettingDialog(getString(R.string.message_turn_on_gps),
+                            new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), REQUEST_CODE_GPS_STATE_CHANGE);
 
                 } else if (!config.getGps() && enabled) {
                     dialogWillShow = true;
-                    postDelayedSystemSettingDialog(getString(R.string.message_turn_off_gps), new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+                    postDelayedSystemSettingDialog(getString(R.string.message_turn_off_gps),
+                            new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), REQUEST_CODE_GPS_STATE_CHANGE);
                 }
             }
         }
@@ -1350,34 +1352,124 @@ public class MainActivity
                     //Intent mobileDataSettingsIntent = new Intent(Intent.ACTION_MAIN);
                     //mobileDataSettingsIntent.setClassName("com.android.phone", "com.android.phone.NetworkSetting");
                     Intent mobileDataSettingsIntent = new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS);
+                    // Mobile data are turned on/off in the status bar! No settings (as the user can go back in settings and do something nasty)
                     if (config.getMobileData() && !enabled) {
-                        postDelayedSystemSettingDialog(getString(R.string.message_turn_on_mobile_data), mobileDataSettingsIntent);
+                        postDelayedSystemSettingDialog(getString(R.string.message_turn_on_mobile_data), /*mobileDataSettingsIntent*/null);
                     } else if (!config.getMobileData() && enabled) {
-                        postDelayedSystemSettingDialog(getString(R.string.message_turn_off_mobile_data), mobileDataSettingsIntent);
+                        postDelayedSystemSettingDialog(getString(R.string.message_turn_off_mobile_data), /*mobileDataSettingsIntent*/null);
                     }
                 } catch (Exception e) {
                     // Some problem accessible private API
                 }
             }
         }
+
+        if (!Utils.setPasswordMode(config.getPasswordMode(), this)) {
+            Intent updatePasswordIntent = new Intent(DevicePolicyManager.ACTION_SET_NEW_PASSWORD);
+            // Different Android versions/builds use different activities to setup password
+            // So we have to enable temporary access to settings here (and only here!)
+            postDelayedSystemSettingDialog(getString(R.string.message_set_password), updatePasswordIntent, null, true);
+        }
+
+        if (config.getTimeZone() != null) {
+            Utils.setTimeZone(config.getTimeZone(), this);
+        }
+
+        if (config.getUsbStorage() != null) {
+            Utils.lockUsbStorage(config.getUsbStorage(), this);
+        }
+
+        // Null value is processed here, it means unlock brightness
+        Utils.setBrightnessPolicy(config.getAutoBrightness(), config.getBrightness(), this);
+
+        if (config.getManageTimeout() != null) {
+            Utils.setScreenTimeoutPolicy(config.getManageTimeout(), config.getTimeout(), this);
+        }
+
+        if (config.getManageVolume() != null && config.getManageVolume() && config.getVolume() != null) {
+            Utils.lockVolume(false, this);
+            if (!Utils.setVolume(config.getVolume(), this)) {
+                RemoteLogger.log(this, Const.LOG_WARN, "Failed to set the device volume");
+            }
+        }
+
+        if (config.getLockVolume() != null) {
+            Utils.lockVolume(config.getLockVolume(), this);
+        }
+
+        Utils.disableScreenshots(config.isDisableScreenshots(), this);
+
         return true;
     }
 
-    private void showContent( ServerConfig config ) {
+    private void lockRestrictions() {
+        if (settingsHelper.getConfig() != null && settingsHelper.getConfig().getRestrictions() != null) {
+            Utils.lockUserRestrictions(MainActivity.this, settingsHelper.getConfig().getRestrictions());
+        }
+        setActions();
+    }
+
+    private void setActions() {
+        final ServerConfig config = settingsHelper.getConfig();
+        // As per the documentation, setting the default preferred activity should not be done on the main thread
+        new AsyncTask<Void, Void, Void>() {
+            @Override
+            protected Void doInBackground(Void... voids) {
+                // If kiosk browser is installed, make it a default browser
+                // This is a temporary solution! Perhaps user wants only to open specific hosts / schemes
+                if (Utils.isDeviceOwner(MainActivity.this)) {
+                    if (config.getActions() != null && config.getActions().size() > 0) {
+                        for (Action action : config.getActions()) {
+                            Utils.setAction(MainActivity.this, action);
+                        }
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            protected void onPostExecute(Void v) {
+                Log.i(Const.LOG_TAG, "Showing content from setActions()");
+                showContent(settingsHelper.getConfig());
+            }
+        }.execute();
+    }
+
+    private void showContent(ServerConfig config ) {
         if (!checkSystemSettings(config)) {
             // Here we go when the settings window is opened;
             // Next time we're here after we returned from the Android settings through onResume()
             return;
         }
 
+        sendDeviceInfoAfterReconfigure();
         scheduleDeviceInfoSending();
         scheduleInstalledAppsRun();
 
+        if (config.getLock() != null && config.getLock()) {
+            showLockScreen();
+            return;
+        } else {
+            hideLockScreen();
+        }
+
+        // Run default launcher option
+        if (config.getRunDefaultLauncher() != null && config.getRunDefaultLauncher() &&
+            !getPackageName().equals(Utils.getDefaultLauncher(this)) && !Utils.isLauncherIntent(getIntent())) {
+            openDefaultLauncher();
+            return;
+        }
+
+        Utils.setOrientation(this, config);
+
         if (ProUtils.kioskModeRequired(this)) {
             String kioskApp = settingsHelper.getConfig().getMainApp();
-            // It is not possible to set Headwind MDM as a main app: the logic is then broken
-            if (kioskApp != null && kioskApp.trim().length() > 0 && !kioskApp.equals(getPackageName())) {
-                if (ProUtils.startCosuKioskMode(kioskApp, this)) {
+            if (kioskApp != null && kioskApp.trim().length() > 0 &&
+                    // If Headwind MDM itself is set as kiosk app, the kiosk mode is already turned on;
+                    // So here we just proceed to drawing the content
+                    (!kioskApp.equals(getPackageName()) || !ProUtils.isKioskModeRunning(this))) {
+                if (ProUtils.startCosuKioskMode(kioskApp, this, false)) {
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                     return;
                 } else {
                     Log.e(Const.LOG_TAG, "Kiosk mode failed, proceed with the default flow");
@@ -1406,28 +1498,126 @@ public class MainActivity
         }
         updateTitle(config);
 
-        if ( config.getBackgroundImageUrl() != null && config.getBackgroundImageUrl().length() > 0 ) {
-            Picasso.with( this ).
-                    load( config.getBackgroundImageUrl() ).
-                    into( binding.activityMainBackground );
-        } else {
-            binding.activityMainBackground.setImageDrawable(null);
+        if (mainAppListAdapter == null || needRedrawContentAfterReconfigure) {
+            needRedrawContentAfterReconfigure = false;
+
+            if ( config.getBackgroundImageUrl() != null && config.getBackgroundImageUrl().length() > 0 ) {
+                Picasso.Builder builder = new Picasso.Builder(this);
+                if (BuildConfig.TRUST_ANY_CERTIFICATE) {
+                    builder.downloader(new OkHttp3Downloader(UnsafeOkHttpClient.getUnsafeOkHttpClient()));
+                } else if (BuildConfig.CHECK_SIGNATURE) {
+                    // Here we assume TRUST_ANY_CERTIFICATE and CHECK_SIGNATURE are not turned on together!
+                    // That makes no sense: TRUST_ANY_CERTIFICATE is unsafe, but CHECK_SIGNATURE is for safe setup
+                    OkHttpClient clientWithSignature = new OkHttpClient.Builder()
+                            .addInterceptor(chain -> {
+                                okhttp3.Request.Builder requestBuilder = chain.request().newBuilder();
+                                String signature = InstallUtils.getRequestSignature(chain.request().url().toString());
+                                if (signature != null) {
+                                    requestBuilder.addHeader("X-Request-Signature", signature);
+                                }
+                                return chain.proceed(requestBuilder.build());
+
+                            })
+                            .build();
+                    builder.downloader(new OkHttp3Downloader(clientWithSignature));
+                }
+                builder.listener(new Picasso.Listener()
+                {
+                    @Override
+                    public void onImageLoadFailed(Picasso picasso, Uri uri, Exception exception)
+                    {
+                        // On fault, get the background image from the cache
+                        // This is a workaround against a bug in Picasso: it doesn't display cached images by default!
+                        Picasso.with(MainActivity.this)
+                            .load(config.getBackgroundImageUrl())
+                            .networkPolicy(NetworkPolicy.OFFLINE)
+                            .into(binding.activityMainBackground);
+                    }
+                });
+                builder.build()
+                    .load(config.getBackgroundImageUrl())
+                    .into(binding.activityMainBackground);
+
+            } else {
+                binding.activityMainBackground.setImageDrawable(null);
+            }
+
+            Display display = getWindowManager().getDefaultDisplay();
+            Point size = new Point();
+            display.getSize(size);
+
+            int width = size.x;
+            int itemWidth = getResources().getDimensionPixelSize(R.dimen.app_list_item_size);
+
+            spanCount = (int) (width * 1.0f / itemWidth);
+            mainAppListAdapter = new MainAppListAdapter(this, this, this);
+            mainAppListAdapter.setSpanCount(spanCount);
+
+            binding.activityMainContent.setLayoutManager(new GridLayoutManager(this, spanCount));
+            binding.activityMainContent.setAdapter(mainAppListAdapter);
+            mainAppListAdapter.notifyDataSetChanged();
+
+            int bottomAppCount = AppShortcutManager.getInstance().getInstalledAppCount(this, true);
+            if (bottomAppCount > 0) {
+                bottomAppListAdapter = new BottomAppListAdapter(this, this, this);
+                bottomAppListAdapter.setSpanCount(spanCount);
+
+                binding.activityBottomLayout.setVisibility(View.VISIBLE);
+                binding.activityBottomLine.setLayoutManager(new GridLayoutManager(this, bottomAppCount < spanCount ? bottomAppCount : spanCount));
+                binding.activityBottomLine.setAdapter(bottomAppListAdapter);
+                bottomAppListAdapter.notifyDataSetChanged();
+            } else {
+                bottomAppListAdapter = null;
+                binding.activityBottomLayout.setVisibility(View.GONE);
+            }
         }
-
-        Display display = getWindowManager().getDefaultDisplay();
-        Point size = new Point();
-        display.getSize( size );
-
-        int width = size.x;
-        int itemWidth = getResources().getDimensionPixelSize( R.dimen.app_list_item_size );
-
-        int spanCount = ( int ) ( width * 1.0f / itemWidth );
-
-        binding.activityMainContent.setLayoutManager( new GridLayoutManager( this, spanCount ) );
-        binding.activityMainContent.setAdapter( new AppListAdapter( this, this ) );
         binding.setShowContent(true);
         // We can now sleep, uh
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private void showLockScreen() {
+        if (lockScreen == null) {
+            createLockScreen();
+            if (lockScreen == null) {
+                // Why cannot we create the lock screen? Give up and return
+                // The locked device will show the launcher, but still cannot run any application
+                return;
+            }
+        }
+        String lockAdminMessage = settingsHelper.getConfig().getLockMessage();
+        String lockMessage = getString(R.string.device_locked);
+        if (lockAdminMessage != null) {
+            lockMessage += " " + lockAdminMessage;
+        }
+        TextView textView = lockScreen.findViewById( R.id.message );
+        textView.setText(lockMessage);
+        lockScreen.setVisibility(View.VISIBLE);
+    }
+
+    private void hideLockScreen() {
+        if (lockScreen != null && lockScreen.getVisibility() == View.VISIBLE) {
+            lockScreen.setVisibility(View.GONE);
+        }
+    }
+
+    private void notifyPolicyViolation(int cause) {
+        switch (cause) {
+            case Const.GPS_ON_REQUIRED:
+                postDelayedSystemSettingDialog(getString(R.string.message_turn_on_gps),
+                        new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), REQUEST_CODE_GPS_STATE_CHANGE);
+                break;
+            case Const.GPS_OFF_REQUIRED:
+                postDelayedSystemSettingDialog(getString(R.string.message_turn_off_gps),
+                        new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), REQUEST_CODE_GPS_STATE_CHANGE);
+                break;
+            case Const.MOBILE_DATA_ON_REQUIRED:
+                createAndShowSystemSettingDialog(getString(R.string.message_turn_on_mobile_data), null, 0);
+                break;
+            case Const.MOBILE_DATA_OFF_REQUIRED:
+                createAndShowSystemSettingDialog(getString(R.string.message_turn_off_mobile_data), null, 0);
+                break;
+        }
     }
 
     // Run default launcher (Headwind MDM) as if the user clicked Home button
@@ -1475,12 +1665,23 @@ public class MainActivity
                     response = secondaryServerService.sendDevice(settingsHelper.getServerProject(), deviceInfo).execute();
                 }
                 if ( response.isSuccessful() ) {
+                    SettingsHelper.getInstance(context).setExternalIp(response.headers().get(Const.HEADER_IP_ADDRESS));
                     return Result.success();
                 }
             }
             catch ( Exception e ) { e.printStackTrace(); }
 
             return Result.failure();
+        }
+    }
+
+    // If we updated the configuration, let's send the final state to the server
+    private void sendDeviceInfoAfterReconfigure() {
+        if (needSendDeviceInfoAfterReconfigure) {
+            needSendDeviceInfoAfterReconfigure = false;
+            SendDeviceInfoTask sendDeviceInfoTask = new SendDeviceInfoTask(this);
+            DeviceInfo deviceInfo = DeviceInfoProvider.getDeviceInfo(this, true, true);
+            sendDeviceInfoTask.execute(deviceInfo);
         }
     }
 
@@ -1492,11 +1693,14 @@ public class MainActivity
         PeriodicWorkRequest request =
                 new PeriodicWorkRequest.Builder(SendDeviceInfoWorker.class, SEND_DEVICE_INFO_PERIOD_MINS, TimeUnit.MINUTES)
                         .addTag(Const.WORK_TAG_COMMON)
+                        .setInitialDelay(SEND_DEVICE_INFO_PERIOD_MINS, TimeUnit.MINUTES)
                         .build();
         WorkManager.getInstance(getApplicationContext()).enqueueUniquePeriodicWork(WORK_TAG_DEVICEINFO, ExistingPeriodicWorkPolicy.REPLACE, request);
     }
 
     private void scheduleInstalledAppsRun() {
+        List<Application> applicationsForRun = configUpdater.getApplicationsForRun();
+
         if (applicationsForRun.size() == 0) {
             return;
         }
@@ -1541,6 +1745,8 @@ public class MainActivity
     protected void onDestroy() {
         super.onDestroy();
 
+        settingsHelper.setMainActivityRunning(false);
+
         WindowManager manager = ((WindowManager)getApplicationContext().getSystemService(Context.WINDOW_SERVICE));
         if ( applicationNotAllowed != null ) {
             try { manager.removeView( applicationNotAllowed ); }
@@ -1580,6 +1786,8 @@ public class MainActivity
     protected void onPause() {
         super.onPause();
 
+        isBackground = true;
+
         dismissDialog(fileNotDownloadedDialog);
         dismissDialog(enterDeviceIdDialog);
         dismissDialog(networkErrorDialog);
@@ -1604,6 +1812,8 @@ public class MainActivity
                 R.layout.dialog_administrator_mode,
                 null,
                 false );
+        dialogAdministratorModeBinding.hint.setText(
+                getString(R.string.dialog_administrator_mode_message, getString(R.string.app_name)));
         administratorModeDialog.setCancelable( false );
         administratorModeDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
@@ -1614,6 +1824,7 @@ public class MainActivity
     public void skipAdminMode( View view ) {
         dismissDialog(administratorModeDialog);
 
+        RemoteLogger.log(this, Const.LOG_INFO, "Manually skipped the device admin permissions setup");
         preferences.
                 edit().
                 putInt( Const.PREFERENCES_ADMINISTRATOR, Const.PREFERENCES_OFF ).
@@ -1630,7 +1841,7 @@ public class MainActivity
         startActivity(intent);
     }
 
-    private void createAndShowFileNotDownloadedDialog( Application application ) {
+    private void createAndShowFileNotDownloadedDialog(String fileName) {
         dismissDialog(fileNotDownloadedDialog);
         fileNotDownloadedDialog = new Dialog( this );
         dialogFileDownloadingFailedBinding = DataBindingUtil.inflate(
@@ -1638,7 +1849,8 @@ public class MainActivity
                 R.layout.dialog_file_downloading_failed,
                 null,
                 false );
-        dialogFileDownloadingFailedBinding.title.setText( getString(R.string.main_app_downloading_error) + " " + application.getName() );
+        int errorTextResource = this.downloadingFile ? R.string.main_file_downloading_error : R.string.main_app_downloading_error;
+        dialogFileDownloadingFailedBinding.title.setText( getString(errorTextResource) + " " + fileName );
         fileNotDownloadedDialog.setCancelable( false );
         fileNotDownloadedDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
@@ -1652,17 +1864,21 @@ public class MainActivity
 
     public void repeatDownloadClicked( View view ) {
         dismissDialog(fileNotDownloadedDialog);
-        loadAndInstallApplications();
+        if (downloadingFile) {
+            configUpdater.repeatDownloadFiles();
+        } else {
+            configUpdater.repeatDownloadApps();
+        }
     }
 
     public void confirmDownloadFailureClicked( View view ) {
-        if (applicationsForInstall.size() > 0) {
-            Application application = applicationsForInstall.remove( 0 );
-            settingsHelper.removeApplication( application );
-        }
-
         dismissDialog(fileNotDownloadedDialog);
-        loadAndInstallApplications();
+
+        if (downloadingFile) {
+            configUpdater.skipDownloadFiles();
+        } else {
+            configUpdater.skipDownloadApps();
+        }
     }
 
     private void createAndShowHistorySettingsDialog() {
@@ -1673,6 +1889,8 @@ public class MainActivity
                 R.layout.dialog_history_settings,
                 null,
                 false );
+        dialogHistorySettingsBinding.hint.setText(
+                getString(R.string.dialog_history_settings_title, getString(R.string.app_name)));
         historySettingsDialog.setCancelable( false );
         historySettingsDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
@@ -1704,6 +1922,8 @@ public class MainActivity
                 R.layout.dialog_overlay_settings,
                 null,
                 false );
+        dialogOverlaySettingsBinding.hint.setText(
+                getString(R.string.dialog_overlay_settings_title, getString(R.string.app_name)));
         overlaySettingsDialog.setCancelable( false );
         overlaySettingsDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
@@ -1729,9 +1949,6 @@ public class MainActivity
         startActivityForResult( intent, 1001 );
     }
 
-    public void showDeviceIdVariants( View view ) {
-        enterDeviceIdDialogBinding.deviceId.showDropDown();
-    }
 
     public void saveDeviceId( View view ) {
         String deviceId = enterDeviceIdDialogBinding.deviceId.getText().toString();
@@ -1744,7 +1961,7 @@ public class MainActivity
             dismissDialog(enterDeviceIdDialog);
 
             if ( checkPermissions( true ) ) {
-                Log.i(LOG_TAG, "saveDeviceId(): calling updateConfig()");
+                Log.i(Const.LOG_TAG, "saveDeviceId(): calling updateConfig()");
                 updateConfig( false );
             }
         }
@@ -1753,6 +1970,7 @@ public class MainActivity
 
     public void saveServerUrl( View view ) {
         if (saveServerUrlBase()) {
+            ServerServiceKeeper.resetServices();
             checkAndStartLauncher();
         }
     }
@@ -1761,25 +1979,52 @@ public class MainActivity
     public void networkErrorRepeatClicked( View view ) {
         dismissDialog(networkErrorDialog);
 
-        Log.i(LOG_TAG, "networkErrorRepeatClicked(): calling updateConfig()");
-        updateConfig( false );
+        Log.i(Const.LOG_TAG, "networkErrorRepeatClicked(): calling updateConfig()");
+        updateConfig( true );
+    }
+
+    public void networkErrorResetClicked( View view ) {
+        dismissDialog(networkErrorDialog);
+
+        Log.i(Const.LOG_TAG, "networkErrorResetClicked(): calling updateConfig()");
+        settingsHelper.setDeviceId("");
+        settingsHelper.setBaseUrl("");
+        settingsHelper.setSecondaryBaseUrl("");
+        settingsHelper.setServerProject("");
+        createAndShowServerDialog(false, settingsHelper.getBaseUrl(), settingsHelper.getServerProject());
+    }
+
+    public void networkErrorWifiClicked( View view ) {
+        LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_ENABLE_SETTINGS));
+        if (ProUtils.kioskModeRequired(this) && ProUtils.isKioskModeRunning(this)) {
+            String kioskApp = settingsHelper.getConfig().getMainApp();
+            ProUtils.startCosuKioskMode(kioskApp, this, true);
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));
+            }
+        }, 500);
     }
 
     public void networkErrorCancelClicked(View view) {
         dismissDialog(networkErrorDialog);
 
         if (configFault) {
-            Log.i(LOG_TAG, "networkErrorCancelClicked(): no configuration available, quit");
-            Toast.makeText(this, R.string.critical_server_failure, Toast.LENGTH_LONG).show();
+            Log.i(Const.LOG_TAG, "networkErrorCancelClicked(): no configuration available, quit");
+            Toast.makeText(this, getString(R.string.critical_server_failure,
+                    getString(R.string.app_name)), Toast.LENGTH_LONG).show();
             finish();
             return;
         }
 
-        Log.i(LOG_TAG, "networkErrorCancelClicked()");
+        Log.i(Const.LOG_TAG, "networkErrorCancelClicked()");
         if ( settingsHelper.getConfig() != null ) {
             showContent( settingsHelper.getConfig() );
+            configUpdater.skipConfigLoad();
         } else {
-            Log.i(LOG_TAG, "networkErrorCancelClicked(): no configuration available, retrying");
+            Log.i(Const.LOG_TAG, "networkErrorCancelClicked(): no configuration available, retrying");
             Toast.makeText(this, R.string.empty_configuration, Toast.LENGTH_LONG).show();
             configFault = true;
             updateConfig( false );
@@ -1794,6 +2039,12 @@ public class MainActivity
         // If the user didn't grant permissions, let him know and do not request until he confirms he want to retry
         if (permissionsDialog != null && permissionsDialog.isShowing()) {
             return false;
+        }
+
+        if (Utils.isDeviceOwner(this)) {
+            // Do not request permissions if we're the device owner
+            // They are added automatically
+            return true;
         }
 
         if (preferences.getInt(Const.PREFERENCES_DISABLE_LOCATION, Const.PREFERENCES_OFF) == Const.PREFERENCES_ON) {
@@ -1859,6 +2110,7 @@ public class MainActivity
         dismissDialog(enterPasswordDialog);
         if (ProUtils.kioskModeRequired(this)) {
             checkAndStartLauncher();
+            updateConfig(false);
         }
     }
 
@@ -1881,6 +2133,7 @@ public class MainActivity
                     if (ProUtils.kioskModeRequired(MainActivity.this)) {
                         ProUtils.unlockKiosk(MainActivity.this);
                     }
+                    RemoteLogger.log(MainActivity.this, Const.LOG_INFO, "Administrator panel opened");
                     startActivity( new Intent( MainActivity.this, AdminActivity.class ) );
                 } else {
                     dialogEnterPasswordBinding.setError( true );
@@ -1915,7 +2168,7 @@ public class MainActivity
         }
     }
 
-    private void createAndShowMiuiPermissionsDialog() {
+    private void createAndShowMiuiPermissionsDialog(int screen) {
         dismissDialog(miuiPermissionsDialog);
         miuiPermissionsDialog = new Dialog( this );
         dialogMiuiPermissionsBinding = DataBindingUtil.inflate(
@@ -1926,17 +2179,43 @@ public class MainActivity
         miuiPermissionsDialog.setCancelable( false );
         miuiPermissionsDialog.requestWindowFeature( Window.FEATURE_NO_TITLE );
 
+        switch (screen) {
+            case Const.MIUI_PERMISSIONS:
+                dialogMiuiPermissionsBinding.title.setText(R.string.dialog_miui_permissions_title);
+                break;
+            case Const.MIUI_DEVELOPER:
+                dialogMiuiPermissionsBinding.title.setText(R.string.dialog_miui_developer_title);
+                break;
+            case Const.MIUI_OPTIMIZATION:
+                dialogMiuiPermissionsBinding.title.setText(R.string.dialog_miui_optimization_title);
+                break;
+        }
+
         miuiPermissionsDialog.setContentView( dialogMiuiPermissionsBinding.getRoot() );
         miuiPermissionsDialog.show();
     }
 
     public void continueMiuiPermissions( View view ) {
+        String titleText = dialogMiuiPermissionsBinding.title.getText().toString();
         dismissDialog(miuiPermissionsDialog);
 
-        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-        Uri uri = Uri.fromParts("package", getPackageName(), null);
-        intent.setData(uri);
-        startActivity(intent);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_ENABLE_SETTINGS));
+        Intent intent;
+        if (titleText.equals(getString(R.string.dialog_miui_permissions_title))) {
+            intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            Uri uri = Uri.fromParts("package", getPackageName(), null);
+            intent.setData(uri);
+        } else if (titleText.equals(getString(R.string.dialog_miui_developer_title))) {
+            intent = new Intent(Settings.ACTION_DEVICE_INFO_SETTINGS);
+        } else {
+            // if (titleText.equals(getString(R.string.dialog_miui_optimization_title))
+            intent = new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS);
+        }
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     @Override
@@ -1945,6 +2224,20 @@ public class MainActivity
     @Override
     public void onAppChoose( @NonNull AppInfo resolveInfo ) {
 
+    }
+
+    @Override
+    public boolean switchAppListAdapter(BaseAppListAdapter adapter, int direction) {
+        if (adapter == mainAppListAdapter && bottomAppListAdapter != null &&
+                (direction == Const.DIRECTION_RIGHT || direction == Const.DIRECTION_DOWN)) {
+            bottomAppListAdapter.setFocused(true);
+            return true;
+        } else if (adapter == bottomAppListAdapter &&
+                (direction == Const.DIRECTION_LEFT || direction == Const.DIRECTION_UP)) {
+            mainAppListAdapter.setFocused(true);
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -1960,10 +2253,10 @@ public class MainActivity
             createAndShowInfoDialog();
         } else if (v.equals(updateView)) {
             if (enterDeviceIdDialog != null && enterDeviceIdDialog.isShowing()) {
-                Log.i(LOG_TAG, "Occasional update request when device info is entered, ignoring!");
+                Log.i(Const.LOG_TAG, "Occasional update request when device info is entered, ignoring!");
                 return;
             }
-            Log.i(LOG_TAG, "updating config on request");
+            Log.i(Const.LOG_TAG, "updating config on request");
             binding.setShowContent(false);
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             updateConfig( true );
@@ -1971,17 +2264,32 @@ public class MainActivity
     }
 
     private void postDelayedSystemSettingDialog(final String message, final Intent settingsIntent) {
-        LocalBroadcastManager.getInstance( this ).sendBroadcast( new Intent( Const.ACTION_ENABLE_SETTINGS ) );
+        postDelayedSystemSettingDialog(message, settingsIntent, null);
+    }
+
+    private void postDelayedSystemSettingDialog(final String message, final Intent settingsIntent, final Integer requestCode) {
+        postDelayedSystemSettingDialog(message, settingsIntent, requestCode, false);
+    }
+
+    private void postDelayedSystemSettingDialog(final String message, final Intent settingsIntent, final Integer requestCode, final boolean forceEnableSettings) {
+        if (settingsIntent != null) {
+            // If settings are controlled by usage stats, safe settings are allowed, so we need to enable settings in accessibility mode only
+            // Accessibility mode is only enabled when usage stats is off
+            if (preferences.getInt(Const.PREFERENCES_ACCESSIBILITY_SERVICE, Const.PREFERENCES_OFF) == Const.PREFERENCES_ON || forceEnableSettings) {
+                LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_ENABLE_SETTINGS));
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_STOP_CONTROL));
+        }
         // Delayed start prevents the race of ENABLE_SETTINGS handle and tapping "Next" button
         new Handler().postDelayed(new Runnable() {
             @Override
             public void run() {
-                createAndShowSystemSettingDialog(message, settingsIntent);
+                createAndShowSystemSettingDialog(message, settingsIntent, requestCode);
             }
         }, 5000);
     }
 
-    private void createAndShowSystemSettingDialog(final String message, final Intent settingsIntent) {
+    private void createAndShowSystemSettingDialog(final String message, final Intent settingsIntent, final Integer requestCode) {
         dismissDialog(systemSettingsDialog);
         systemSettingsDialog = new Dialog( this );
         dialogSystemSettingsBinding = DataBindingUtil.inflate(
@@ -2001,6 +2309,9 @@ public class MainActivity
             @Override
             public void onClick(View v) {
                 dismissDialog(systemSettingsDialog);
+                if (settingsIntent == null) {
+                    return;
+                }
                 // Enable settings once again, because the dialog may be shown more than 3 minutes
                 // This is not necessary: the problem is resolved by clicking "Continue" in a popup window
                 /*LocalBroadcastManager.getInstance( MainActivity.this ).sendBroadcast( new Intent( Const.ACTION_ENABLE_SETTINGS ) );
@@ -2012,15 +2323,30 @@ public class MainActivity
                     }
                 }, 300);*/
                 try {
-                    startActivity(settingsIntent);
+                    startActivityOptionalResult(settingsIntent, requestCode);
                 } catch (/*ActivityNotFound*/Exception e) {
                     // Open settings by default
-                    startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS));
+                    startActivityOptionalResult(new Intent(android.provider.Settings.ACTION_SETTINGS), requestCode);
                 }
             }
         });
 
-        systemSettingsDialog.show();
+        try {
+            systemSettingsDialog.show();
+        } catch (Exception e) {
+            // BadTokenException: activity closed before dialog is shown
+            RemoteLogger.log(this, Const.LOG_WARN, "Failed to open a popup system dialog! " + e.getMessage());
+            e.printStackTrace();
+            systemSettingsDialog = null;
+        }
+    }
+
+    private void startActivityOptionalResult(Intent intent, Integer requestCode) {
+        if (requestCode != null) {
+            startActivityForResult(intent, requestCode);
+        } else {
+            startActivity(intent);
+        }
     }
 
     // The following algorithm of launcher restart works in EMUI:
@@ -2039,5 +2365,17 @@ public class MainActivity
         Log.i("LauncherRestarter", "Calling launcher restarter from the launcher");
     }
 
-
+    // Create a new file from the template file
+    // (replace DEVICE_NUMBER, IMEI, CUSTOM* by their values)
+    private void createFileFromTemplate(File srcFile, File dstFile, String deviceId, ServerConfig config) throws IOException {
+        // We are supposed to process only small text files
+        // So here we are reading the whole file, replacing variables, and save the content
+        // It is not optimal for large files - it would be better to replace in a stream (how?)
+        String content = FileUtils.readFileToString(srcFile);
+        content = content.replace("DEVICE_NUMBER", deviceId)
+                .replace("CUSTOM1", config.getCustom1() != null ? config.getCustom1() : "")
+                .replace("CUSTOM2", config.getCustom2() != null ? config.getCustom2() : "")
+                .replace("CUSTOM3", config.getCustom3() != null ? config.getCustom3() : "");
+        FileUtils.writeStringToFile(dstFile, content);
+    }
 }

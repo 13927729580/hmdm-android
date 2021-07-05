@@ -30,8 +30,9 @@ import java.util.List;
 public class DeviceInfo {
 
     private String model;
-    private List< Integer > permissions = new LinkedList();
-    private List< Application > applications = new LinkedList();
+    private List<Integer> permissions = new LinkedList();
+    private List<Application> applications = new LinkedList();
+    private List<RemoteFile> files = new LinkedList();
     private String deviceId;
     private String phone;
     private String imei;
@@ -42,6 +43,21 @@ public class DeviceInfo {
     private Boolean factoryReset;
     private Location location;
     private String launcherType;
+    private String launcherPackage;
+    private boolean defaultLauncher;
+    private String iccid;
+    private String imsi;
+    private String phone2;
+    private String imei2;
+    private String iccid2;
+    private String imsi2;
+    private String cpu;
+    private String serial;
+
+    // These fields are reserved for custom builds of Headwind MDM
+    private String custom1;
+    private String custom2;
+    private String custom3;
 
     public static class Location {
         private long ts;
@@ -79,24 +95,32 @@ public class DeviceInfo {
         return model;
     }
 
-    public void setModel( String model ) {
+    public void setModel(String model) {
         this.model = model;
     }
 
-    public List< Integer > getPermissions() {
+    public List<Integer> getPermissions() {
         return permissions;
     }
 
-    public void setPermissions( List< Integer > permissions ) {
+    public void setPermissions(List<Integer> permissions) {
         this.permissions = permissions;
     }
 
-    public List< Application > getApplications() {
+    public List<Application> getApplications() {
         return applications;
     }
 
-    public void setApplications( List< Application > applications ) {
+    public void setApplications(List<Application> applications) {
         this.applications = applications;
+    }
+
+    public List<RemoteFile> getFiles() {
+        return files;
+    }
+
+    public void setFiles(List<RemoteFile> files) {
+        this.files = files;
     }
 
     public String getDeviceId() {
@@ -177,5 +201,109 @@ public class DeviceInfo {
 
     public void setLauncherType(String launcherType) {
         this.launcherType = launcherType;
+    }
+
+    public String getLauncherPackage() {
+        return launcherPackage;
+    }
+
+    public void setLauncherPackage(String launcherPackage) {
+        this.launcherPackage = launcherPackage;
+    }
+
+    public boolean isDefaultLauncher() {
+        return defaultLauncher;
+    }
+
+    public void setDefaultLauncher(boolean defaultLauncher) {
+        this.defaultLauncher = defaultLauncher;
+    }
+
+    public String getIccid() {
+        return iccid;
+    }
+
+    public void setIccid(String iccid) {
+        this.iccid = iccid;
+    }
+
+    public String getImsi() {
+        return imsi;
+    }
+
+    public void setImsi(String imsi) {
+        this.imsi = imsi;
+    }
+
+    public String getPhone2() {
+        return phone2;
+    }
+
+    public void setPhone2(String phone2) {
+        this.phone2 = phone2;
+    }
+
+    public String getImei2() {
+        return imei2;
+    }
+
+    public void setImei2(String imei2) {
+        this.imei2 = imei2;
+    }
+
+    public String getIccid2() {
+        return iccid2;
+    }
+
+    public void setIccid2(String iccid2) {
+        this.iccid2 = iccid2;
+    }
+
+    public String getImsi2() {
+        return imsi2;
+    }
+
+    public void setImsi2(String imsi2) {
+        this.imsi2 = imsi2;
+    }
+
+    public String getCpu() {
+        return cpu;
+    }
+
+    public void setCpu(String cpu) {
+        this.cpu = cpu;
+    }
+
+    public String getSerial() {
+        return serial;
+    }
+
+    public void setSerial(String serial) {
+        this.serial = serial;
+    }
+
+    public String getCustom1() {
+        return custom1;
+    }
+
+    public void setCustom1(String custom1) {
+        this.custom1 = custom1;
+    }
+
+    public String getCustom2() {
+        return custom2;
+    }
+
+    public void setCustom2(String custom2) {
+        this.custom2 = custom2;
+    }
+
+    public String getCustom3() {
+        return custom3;
+    }
+
+    public void setCustom3(String custom3) {
+        this.custom3 = custom3;
     }
 }

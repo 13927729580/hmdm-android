@@ -19,7 +19,6 @@
 
 package com.hmdm.launcher.ui;
 
-import android.app.ProgressDialog;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -27,7 +26,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
 import android.util.Log;
 import android.view.View;
 import android.widget.Toast;
@@ -46,12 +44,12 @@ import com.hmdm.launcher.server.ServerServiceKeeper;
 import com.hmdm.launcher.util.AppInfo;
 import com.hmdm.launcher.util.LegacyUtils;
 import com.hmdm.launcher.util.PushNotificationMqttWrapper;
+import com.hmdm.launcher.util.RemoteLogger;
 
 public class AdminActivity extends BaseActivity {
 
     private static final String KEY_APP_INFO = "info";
     private SettingsHelper settingsHelper;
-    private ProgressDialog progressDialog;
 
     @Nullable
     public static AppInfo getAppInfo(Intent intent){
@@ -133,6 +131,13 @@ public class AdminActivity extends BaseActivity {
         //finish();
     }
 
+    @Override
+    protected void updateSettingsFromQr(String qrcode) {
+        super.updateSettingsFromQr(qrcode);
+        dismissDialog(enterDeviceIdDialog);
+        binding.deviceId.setText(settingsHelper.getDeviceId());
+    }
+
     public void saveServerUrl(View view ) {
         if (saveServerUrlBase()) {
             ServerServiceKeeper.resetServices();
@@ -158,7 +163,7 @@ public class AdminActivity extends BaseActivity {
 
             dismissDialog(enterDeviceIdDialog);
 
-            Log.i(LOG_TAG, "saveDeviceId(): calling updateConfig()");
+            Log.i(Const.LOG_TAG, "saveDeviceId(): calling updateConfig()");
             updateConfig(view);
         }
     }
@@ -169,36 +174,8 @@ public class AdminActivity extends BaseActivity {
         finish();
     }
 
-    public void exitToSystemLauncher( View view ) {
-        LocalBroadcastManager.getInstance( this ).sendBroadcast( new Intent( Const.ACTION_SERVICE_STOP ) );
-        LocalBroadcastManager.getInstance( this ).sendBroadcast( new Intent( Const.ACTION_EXIT ) );
-
-        // One second delay is required to avoid race between opening a forbidden activity and stopping the locked mode
-        progressDialog = new ProgressDialog(this);
-        progressDialog.setCancelable(false);
-        progressDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER);
-        progressDialog.setMessage(getString(R.string.switch_off_blockings));
-        progressDialog.show();
-
-        new Handler().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (progressDialog != null) {
-                    progressDialog.dismiss();
-                    progressDialog = null;
-                }
-
-                Intent intent = new Intent( Intent.ACTION_MAIN );
-                intent.addCategory( Intent.CATEGORY_HOME );
-                intent.addCategory( Intent.CATEGORY_DEFAULT );
-                intent.setFlags( Intent.FLAG_ACTIVITY_NEW_TASK );
-
-                startActivity( Intent.createChooser( intent, getString( R.string.select_system_launcher ) ) );
-            }
-        }, 1000);
-    }
-
     public void resetPermissions(View view) {
+        LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(Const.ACTION_ENABLE_SETTINGS));
         SharedPreferences preferences = getSharedPreferences( Const.PREFERENCES, MODE_PRIVATE );
         SharedPreferences.Editor editor = preferences.edit();
         editor.remove(Const.PREFERENCES_UNKNOWN_SOURCES);
@@ -207,8 +184,24 @@ public class AdminActivity extends BaseActivity {
         editor.remove(Const.PREFERENCES_OVERLAY);
         editor.remove(Const.PREFERENCES_USAGE_STATISTICS);
         editor.remove(Const.PREFERENCES_DEVICE_OWNER);
+        editor.remove(Const.PREFERENCES_MIUI_PERMISSIONS);
+        editor.remove(Const.PREFERENCES_MIUI_OPTIMIZATION);
+        editor.remove(Const.PREFERENCES_DEVICE_OWNER);
         editor.commit();
+        RemoteLogger.log(this, Const.LOG_INFO, "Reset saved permissions state, will be refreshed at next start");
         Toast.makeText(this, R.string.permissions_reset_hint, Toast.LENGTH_LONG).show();
+    }
+
+
+    public void resetNetworkPolicy(View view) {
+        ServerConfig config = settingsHelper.getConfig();
+        if (config != null) {
+            config.setWifi(null);
+            config.setMobileData(null);
+            settingsHelper.updateConfig(config);
+        }
+        RemoteLogger.log(this, Const.LOG_INFO, "Network policies are cleared");
+        Toast.makeText(this, R.string.admin_reset_network_hint, Toast.LENGTH_LONG).show();
     }
 
     public void reboot(View view) {

@@ -33,12 +33,13 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.widget.Toast;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 
+import com.hmdm.launcher.Const;
 import com.hmdm.launcher.R;
+import com.hmdm.launcher.util.RemoteLogger;
 
 public class LocationService extends Service {
     private LocationManager locationManager;
@@ -61,7 +62,9 @@ public class LocationService extends Service {
         @Override
         public void onLocationChanged(Location location) {
             // Do nothing here: we use getLastKnownLocation() to determine the location!
-            Toast.makeText(LocationService.this, "Location updated from GPS", Toast.LENGTH_SHORT).show();
+            //Toast.makeText(LocationService.this, "Location updated from GPS", Toast.LENGTH_SHORT).show();
+            RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "GPS location update: lat="
+                    + location.getLatitude() + ", lon=" + location.getLongitude());
         }
 
         @Override
@@ -80,7 +83,9 @@ public class LocationService extends Service {
         @Override
         public void onLocationChanged(Location location) {
             // Do nothing here: we use getLastKnownLocation() to determine the location!
-            Toast.makeText(LocationService.this, "Location updated from Network", Toast.LENGTH_SHORT).show();
+            //Toast.makeText(LocationService.this, "Location updated from Network", Toast.LENGTH_SHORT).show();
+            RemoteLogger.log(LocationService.this, Const.LOG_VERBOSE, "Network location update: lat="
+                    + location.getLatitude() + ", lon=" + location.getLongitude());
         }
 
         @Override
@@ -132,6 +137,13 @@ public class LocationService extends Service {
             // No permission, so give up!
             return false;
         }
+
+        boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        boolean passiveEnabled = locationManager.isProviderEnabled(LocationManager.PASSIVE_PROVIDER);
+        RemoteLogger.log(this, Const.LOG_VERBOSE,
+                "Request location updates. gps=" + gpsEnabled + ", network=" + networkEnabled + ", passive=" + passiveEnabled);
+
         locationManager.removeUpdates(networkLocationListener);
         locationManager.removeUpdates(gpsLocationListener);
         try {
@@ -167,14 +179,18 @@ public class LocationService extends Service {
     @Override
     public int onStartCommand(Intent inputIntent, int flags, int startId) {
         boolean legacyGpsFlag = updateViaGps;
-        if (inputIntent.getAction().equals(ACTION_STOP)) {
-            // Stop service
-            started = false;
-            stopForeground(true);
-            stopSelf();
-            return Service.START_NOT_STICKY;
-        } else if (inputIntent.getAction().equals(ACTION_UPDATE_GPS)) {
-            updateViaGps = true;
+        if (inputIntent != null && inputIntent.getAction() != null) {
+            if (inputIntent.getAction().equals(ACTION_STOP)) {
+                // Stop service
+                started = false;
+                stopForeground(true);
+                stopSelf();
+                return Service.START_NOT_STICKY;
+            } else if (inputIntent.getAction().equals(ACTION_UPDATE_GPS)) {
+                updateViaGps = true;
+            } else {
+                updateViaGps = false;
+            }
         } else {
             updateViaGps = false;
         }

@@ -27,6 +27,8 @@ import android.os.Build;
 import android.os.PersistableBundle;
 
 import com.hmdm.launcher.helper.SettingsHelper;
+import com.hmdm.launcher.json.DeviceCreateOptions;
+import com.hmdm.launcher.util.PreferenceLogger;
 
 import static android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_ADMIN_EXTRAS_BUNDLE;
 import static android.content.Context.MODE_PRIVATE;
@@ -37,15 +39,21 @@ import static android.content.Context.MODE_PRIVATE;
 
 public class AdminReceiver extends DeviceAdminReceiver {
 
+    private boolean DEBUG = false;
+
     @Override
     public void onEnabled(Context context, Intent intent) {
         // We come here after both successful provisioning and manual activation of the device owner
         SharedPreferences preferences = context.getApplicationContext().getSharedPreferences( Const.PREFERENCES, MODE_PRIVATE );
+        if (DEBUG) PreferenceLogger.log(preferences, "Administrator enabled");
         preferences.edit().putInt(Const.PREFERENCES_ADMINISTRATOR, Const.PREFERENCES_ON).commit();
     }
 
     @Override
     public void onProfileProvisioningComplete(Context context, Intent intent) {
+        SharedPreferences preferences = context.getApplicationContext().getSharedPreferences( Const.PREFERENCES, MODE_PRIVATE );
+        if (DEBUG) PreferenceLogger.log(preferences, "Profile provisioning complete");
+
         if ( Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP ) {
             // This function is never called on Android versions less than 5 (in fact, less than 7)
             return;
@@ -54,38 +62,74 @@ public class AdminReceiver extends DeviceAdminReceiver {
             SettingsHelper settingsHelper = SettingsHelper.getInstance(context.getApplicationContext());
             PersistableBundle bundle = intent.getParcelableExtra(EXTRA_PROVISIONING_ADMIN_EXTRAS_BUNDLE);
             String deviceId = null;
+            if (DEBUG) PreferenceLogger.log(preferences, "Bundle != null: " + (bundle != null));
             if (bundle != null) {
                 deviceId = bundle.getString(Const.QR_DEVICE_ID_ATTR, null);
                 if (deviceId == null) {
                     // Also let's try legacy attribute
                     deviceId = bundle.getString(Const.QR_LEGACY_DEVICE_ID_ATTR, null);
                 }
+                if (deviceId == null) {
+                    String deviceIdUse = bundle.getString(Const.QR_DEVICE_ID_USE_ATTR, null);
+                    if (deviceIdUse != null) {
+                        if (DEBUG) PreferenceLogger.log(preferences, "deviceIdUse: " + deviceIdUse);
+                        // Save for further automatic choice of the device ID
+                        settingsHelper.setDeviceIdUse(deviceIdUse);
+                    }
+                }
             }
             if (deviceId != null) {
                 // Device ID is delivered in the QR code!
                 // Added: "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {"com.hmdm.DEVICE_ID": "(device id)"}
+                if (DEBUG) PreferenceLogger.log(preferences, "DeviceID: " + deviceId);
                 settingsHelper.setDeviceId(deviceId);
             }
 
             String baseUrl = null;
             String secondaryBaseUrl = null;
             String serverProject = null;
+            DeviceCreateOptions createOptions = new DeviceCreateOptions();
             if (bundle != null) {
                 baseUrl = bundle.getString(Const.QR_BASE_URL_ATTR, null);
                 secondaryBaseUrl = bundle.getString(Const.QR_SECONDARY_BASE_URL_ATTR, null);
                 serverProject = bundle.getString(Const.QR_SERVER_PROJECT_ATTR, null);
+                createOptions.setCustomer(bundle.getString(Const.QR_CUSTOMER_ATTR, null));
+                createOptions.setConfiguration(bundle.getString(Const.QR_CONFIG_ATTR, null));
+                createOptions.setGroups(bundle.getString(Const.QR_GROUP_ATTR, null));
                 if (baseUrl != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "BaseURL: " + baseUrl);
                     settingsHelper.setBaseUrl(baseUrl);
+                    // If we don't set the secondary base URL, it will point to app.h-mdm.com by default which is wrong
+                    if (secondaryBaseUrl == null) {
+                        secondaryBaseUrl = baseUrl;
+                    }
                 }
                 if (secondaryBaseUrl != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "SecondaryBaseURL: " + secondaryBaseUrl);
                     settingsHelper.setSecondaryBaseUrl(secondaryBaseUrl);
                 }
                 if (serverProject != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "ServerPath: " + serverProject);
                     settingsHelper.setServerProject(serverProject);
                 }
+                if (createOptions.getCustomer() != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "Customer: " + createOptions.getCustomer());
+                    settingsHelper.setCreateOptionCustomer(createOptions.getCustomer());
+                }
+                if (createOptions.getConfiguration() != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "Configuration: " + createOptions.getConfiguration());
+                    settingsHelper.setCreateOptionConfigName(createOptions.getConfiguration());
+                }
+                if (createOptions.getGroups() != null) {
+                    if (DEBUG) PreferenceLogger.log(preferences, "Groups: " + bundle.getString(Const.QR_GROUP_ATTR));
+                    settingsHelper.setCreateOptionGroup(createOptions.getGroupSet());
+                }
+                settingsHelper.setQrProvisioning(true);
             }
         } catch (Exception e) {
             // Ignored
+            e.printStackTrace();
+            if (DEBUG) PreferenceLogger.printStackTrace(preferences, e);
         }
     }
 }

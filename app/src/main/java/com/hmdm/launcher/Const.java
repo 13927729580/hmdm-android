@@ -28,9 +28,11 @@ public class Const {
     public static final String ACTION_SERVICE_STOP = "SERVICE_STOP";
     public static final String ACTION_SHOW_LAUNCHER = "SHOW_LAUNCHER";
     public static final String ACTION_ENABLE_SETTINGS = "ENABLE_SETTINGS";
+    public static final String ACTION_STOP_CONTROL = "STOP_CONTROL";
     public static final String ACTION_EXIT = "EXIT";
     public static final String ACTION_HIDE_SCREEN = "HIDE_SCREEN";
     public static final String ACTION_UPDATE_CONFIGURATION = "UPDATE_CONFIGURATION";
+    public static final String ACTION_POLICY_VIOLATION = "ACTION_POLICY_VIOLATION";
     public static final String ACTION_ADMIN = "ADMIN";
     public static final String ACTION_INSTALL_COMPLETE = "INSTALL_COMPLETE";
     public static final String ACTION_DISABLE_BLOCK_WINDOW = "DISABLE_BLOCK_WINDOW";
@@ -39,6 +41,13 @@ public class Const {
     public static final String STATUS_OK = "OK";
     public static final String ORIENTATION = "ORIENTATION";
     public static final String PACKAGE_NAME = "PACKAGE_NAME";
+    public static final String POLICY_VIOLATION_CAUSE = "POLICY_VIOLATION_CAUSE";
+    public static final String RESTORED_ACTIVITY = "RESTORED_ACTIVITY";
+
+    public static final int GPS_ON_REQUIRED = 1;
+    public static final int GPS_OFF_REQUIRED = 2;
+    public static final int MOBILE_DATA_ON_REQUIRED = 3;
+    public static final int MOBILE_DATA_OFF_REQUIRED = 4;
 
     public static final String PREFERENCES = "PREFERENCES";
 
@@ -53,6 +62,14 @@ public class Const {
     public static final String PREFERENCES_UNKNOWN_SOURCES = "PREFERENCES_UNKNOWN_SOURCES";
     public static final String PREFERENCES_DISABLE_LOCATION = "PREFERENCES_DISABLE_LOCATION";
     public static final String PREFERENCES_MIUI_PERMISSIONS = "PREFERENCES_MIUI_PERMISSIONS";
+    public static final String PREFERENCES_MIUI_DEVELOPER = "PREFERENCES_MIUI_DEVELOPER";
+    public static final String PREFERENCES_MIUI_OPTIMIZATION = "PREFERENCES_MIUI_OPTIMIZATION";
+    public static final String PREFERENCES_LOG_STRING = "PREFERENCES_LOG_STRING";
+    public static final String PREFERENCES_DATA_TOKEN = "PREFERENCES_DATA_TOKEN";
+
+    public static final int MIUI_PERMISSIONS = 0;
+    public static final int MIUI_DEVELOPER = 1;
+    public static final int MIUI_OPTIMIZATION = 2;
 
     public static final String LOG_TAG = "HeadwindMDM";
 
@@ -60,16 +77,22 @@ public class Const {
 
     public static final String LAUNCHER_RESTARTER_PACKAGE_ID = "com.hmdm.emuilauncherrestarter";
     public static final String LAUNCHER_RESTARTER_OLD_VERSION = "oldVersion";
+    public static final String LAUNCHER_RESTARTER_STOP = "stop";
 
     public static final String SETTINGS_PACKAGE_NAME = "com.android.settings";
     public static final String GSF_PACKAGE_NAME = "com.google.android.gsf";
     public static final String SYSTEM_UI_PACKAGE_NAME = "com.android.systemui";
+    public static final String KIOSK_BROWSER_PACKAGE_NAME = "com.hmdm.kiosk";
 
     public static final String QR_BASE_URL_ATTR = "com.hmdm.BASE_URL";
     public static final String QR_SECONDARY_BASE_URL_ATTR = "com.hmdm.SECONDARY_BASE_URL";
     public static final String QR_SERVER_PROJECT_ATTR = "com.hmdm.SERVER_PROJECT";
     public static final String QR_DEVICE_ID_ATTR = "com.hmdm.DEVICE_ID";
     public static final String QR_LEGACY_DEVICE_ID_ATTR = "ru.headwind.kiosk.DEVICE_ID";
+    public static final String QR_DEVICE_ID_USE_ATTR = "com.hmdm.DEVICE_ID_USE";
+    public static final String QR_CUSTOMER_ATTR = "com.hmdm.CUSTOMER";
+    public static final String QR_CONFIG_ATTR = "com.hmdm.CONFIG";
+    public static final String QR_GROUP_ATTR = "com.hmdm.GROUP";
 
     public static final int KIOSK_UNLOCK_CLICK_COUNT = 4;
 
@@ -112,4 +135,23 @@ public class Const {
     public static final int LOG_INFO = 3;
     public static final int LOG_DEBUG = 4;
     public static final int LOG_VERBOSE = 5;
+
+    public static final String PASSWORD_QUALITY_PRESENT = "present";
+    public static final String PASSWORD_QUALITY_EASY = "easy";
+    public static final String PASSWORD_QUALITY_MODERATE = "moderate";
+    public static final String PASSWORD_QUALITY_STRONG = "strong";
+
+    public static final String HEADER_IP_ADDRESS = "X-IP-Address";
+    public static final String HEADER_RESPONSE_SIGNATURE = "X-Response-Signature";
+
+    public static final int SCREEN_ORIENTATION_PORTRAIT = 1;
+    public static final int SCREEN_ORIENTATION_LANDSCAPE = 2;
+
+    public static final int DIRECTION_LEFT = 0;
+    public static final int DIRECTION_RIGHT = 1;
+    public static final int DIRECTION_UP = 2;
+    public static final int DIRECTION_DOWN = 3;
+
+    public static final int DEFAULT_PUSH_ALARM_KEEPALIVE_TIME_SEC = 300;
+    public static final int DEFAULT_PUSH_WORKER_KEEPALIVE_TIME_SEC = 900;
 }

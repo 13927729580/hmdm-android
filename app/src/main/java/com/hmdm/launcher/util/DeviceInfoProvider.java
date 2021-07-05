@@ -29,26 +29,34 @@ import android.location.Location;
 import android.location.LocationManager;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Environment;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 
 import com.hmdm.launcher.BuildConfig;
 import com.hmdm.launcher.Const;
+import com.hmdm.launcher.db.DatabaseHelper;
+import com.hmdm.launcher.db.RemoteFileTable;
 import com.hmdm.launcher.helper.SettingsHelper;
 import com.hmdm.launcher.json.Application;
 import com.hmdm.launcher.json.DeviceInfo;
+import com.hmdm.launcher.json.RemoteFile;
 import com.hmdm.launcher.pro.ProUtils;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.List;
 
 public class DeviceInfoProvider {
-
-    private final static String LOG_TAG = "HeadwindMdm";
-
     public static DeviceInfo getDeviceInfo(Context context, boolean queryPermissions, boolean queryApps) {
         DeviceInfo deviceInfo = new DeviceInfo();
         List<Integer> permissions = deviceInfo.getPermissions();
         List<Application> applications = deviceInfo.getApplications();
+        List<RemoteFile> files = deviceInfo.getFiles();
 
         deviceInfo.setModel(Build.MODEL);
 
@@ -56,6 +64,7 @@ public class DeviceInfoProvider {
             permissions.add(Utils.checkAdminMode(context) ? 1 : 0);
             permissions.add(Utils.canDrawOverlays(context) ? 1 : 0);
             permissions.add(ProUtils.checkUsageStatistics(context) ? 1 : 0);
+            permissions.add(ProUtils.checkAccessibilityService(context) ? 1 : 0);
         }
 
         SettingsHelper config = SettingsHelper.getInstance(context);
@@ -90,18 +99,39 @@ public class DeviceInfoProvider {
                         // Application not installed
                     }
                 }
+
+                List<RemoteFile> requiredFiles = SettingsHelper.getInstance(context).getConfig().getFiles();
+                for (RemoteFile remoteFile : requiredFiles) {
+                    File file = new File(Environment.getExternalStorageDirectory(), remoteFile.getPath());
+                    if (file.exists()) {
+                        RemoteFile remoteFileDb = RemoteFileTable.selectByPath(DatabaseHelper.instance(context).getReadableDatabase(),
+                                remoteFile.getPath());
+                        if (remoteFileDb != null) {
+                            files.add(remoteFileDb);
+                        } else {
+                            // How could that happen? The database entry should exist for each file
+                            // Let's recalculate the checksum to check if the file matches
+                            try {
+                                RemoteFile copy = new RemoteFile(remoteFile);
+                                copy.setChecksum(CryptoUtils.calculateChecksum(new FileInputStream(file)));
+                                files.add(copy);
+                            } catch (FileNotFoundException e) {
+                            }
+                        }
+                    }
+                }
             }
         }
 
         deviceInfo.setDeviceId( SettingsHelper.getInstance( context ).getDeviceId() );
 
-        String phone = DeviceInfoProvider.getPhoneNumber(context);
+        String phone = DeviceInfoProvider.getPhoneNumber(context, 0);
         if (phone == null || phone.equals("")) {
             phone = config.getConfig().getPhone();
         }
         deviceInfo.setPhone(phone);
 
-        String imei = DeviceInfoProvider.getImei(context);
+        String imei = DeviceInfoProvider.getImei(context, 0);
         if (imei == null || imei.equals("")) {
             imei = config.getConfig().getImei();
         }
@@ -135,6 +165,19 @@ public class DeviceInfoProvider {
         deviceInfo.setLocation(getLocation(context));
         deviceInfo.setMdmMode(Utils.isDeviceOwner(context));
         deviceInfo.setLauncherType(BuildConfig.FLAVOR);
+        deviceInfo.setCpu(Build.CPU_ABI);
+        deviceInfo.setSerial(getSerialNumber());
+
+        deviceInfo.setImsi(getImsi(context, 0));
+        deviceInfo.setIccid(getIccid(context, 0));
+        deviceInfo.setImei2(getImei(context, 1));
+        deviceInfo.setImsi2(getImsi(context, 1));
+        deviceInfo.setPhone2(getPhoneNumber(context, 1));
+        deviceInfo.setIccid2(getIccid(context, 1));
+
+        String launcherPackage = Utils.getDefaultLauncher(context);
+        deviceInfo.setLauncherPackage(launcherPackage != null ? launcherPackage : "");
+        deviceInfo.setDefaultLauncher(context.getPackageName().equals(launcherPackage));
 
         return deviceInfo;
     }
@@ -174,6 +217,7 @@ public class DeviceInfoProvider {
         return null;
     }
 
+    @SuppressLint("MissingPermission")
     public static String getSerialNumber() {
         String serialNumber = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -206,6 +250,92 @@ public class DeviceInfoProvider {
         }
     }
 
+    @SuppressLint( { "MissingPermission" } )
+    public static String getIccid(Context context) {
+        try {
+            TelephonyManager tMgr = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+            if (tMgr == null) {
+                return null;
+            }
+            return tMgr.getSimSerialNumber();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressLint( { "MissingPermission" } )
+    public static String getImsi(Context context) {
+        try {
+            TelephonyManager tMgr = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+            if (tMgr == null) {
+                return null;
+            }
+            return tMgr.getSubscriberId();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressLint( { "MissingPermission" } )
+    public static String getImsi(Context context, int slot) {
+        String imsi = null;
+        try {
+            TelephonyManager telephonyManager = (TelephonyManager)context.getSystemService(Context.TELEPHONY_SERVICE);
+            // This method is hidden, use reflection
+            // Thanks to https://stackoverflow.com/questions/36902916/subscriptionmanager-to-read-imsi-for-dual-sim-devices-ruuning-android-5-1
+            Class c = Class.forName("android.telephony.TelephonyManager");
+            Method m = c.getMethod("getSubscriberId", new Class[] {int.class});
+            Object o = m.invoke(telephonyManager, new Object[]{slot});
+            imsi = (String)o;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return imsi;
+    }
+
+    @SuppressLint( { "MissingPermission" } )
+    public static String getPhoneNumber(Context context, int slot) {
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
+                if (slot == 0) {
+                    return getPhoneNumber(context);
+                }
+                return null;
+            }
+            SubscriptionManager subscriptionManager = SubscriptionManager.from(context);
+            List<SubscriptionInfo> subscriptionList = subscriptionManager.getActiveSubscriptionInfoList();
+            if (subscriptionList == null || slot >= subscriptionList.size()) {
+                // No mobile info at all
+                return null;
+            }
+            return subscriptionList.get(slot).getNumber();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    @SuppressLint( { "MissingPermission" } )
+    public static String getIccid(Context context, int slot) {
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
+                if (slot == 0) {
+                    return getPhoneNumber(context);
+                }
+                return null;
+            }
+            SubscriptionManager subscriptionManager = SubscriptionManager.from(context);
+            List<SubscriptionInfo> subscriptionList = subscriptionManager.getActiveSubscriptionInfoList();
+            if (subscriptionList == null || slot >= subscriptionList.size()) {
+                // No mobile info at all
+                return null;
+            }
+            return subscriptionList.get(slot).getIccId();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
 
     @SuppressLint( { "MissingPermission" } )
     public static String getImei(Context context) {
@@ -216,6 +346,38 @@ public class DeviceInfoProvider {
             }
             return tMgr.getDeviceId();
         } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressLint( { "MissingPermission" } )
+    public static String getImei(Context context, int slot) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            if (slot == 0) {
+                return getImei(context);
+            }
+            return null;
+        }
+        try {
+            TelephonyManager tMgr = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+            if (tMgr == null) {
+                return null;
+            }
+            return tMgr.getDeviceId(slot);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Get the STB MacAddress
+     */
+    public static String getMacAddress() {
+        try {
+            return Utils.loadFileAsString("/sys/class/net/eth0/address")
+                    .toUpperCase().substring(0, 17);
+        } catch (IOException e) {
+            e.printStackTrace();
             return null;
         }
     }

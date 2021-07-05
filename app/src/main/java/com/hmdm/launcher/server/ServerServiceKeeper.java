@@ -22,6 +22,7 @@ package com.hmdm.launcher.server;
 import android.content.Context;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hmdm.launcher.BuildConfig;
 import com.hmdm.launcher.Const;
 import com.hmdm.launcher.helper.SettingsHelper;
 
@@ -44,7 +45,13 @@ public class ServerServiceKeeper {
 
     public static ServerService getServerServiceInstance(Context context) {
         if ( serverServiceInstance == null ) {
-            serverServiceInstance = createServerService( SettingsHelper.getInstance(context).getBaseUrl() );
+            try {
+                serverServiceInstance = createServerService(SettingsHelper.getInstance(context).getBaseUrl());
+            } catch (Exception e) {
+                // "Invalid URL" exception. We must not be here but in the case we are here,
+                // avoid crash loop by replacing the URL to the default one
+                serverServiceInstance = createServerService(BuildConfig.BASE_URL);
+            }
         }
 
         return serverServiceInstance;
@@ -52,24 +59,35 @@ public class ServerServiceKeeper {
 
     public static ServerService getSecondaryServerServiceInstance(Context context) {
         if ( secondaryServerServiceInstance == null ) {
-            secondaryServerServiceInstance = createServerService( SettingsHelper.getInstance(context).getSecondaryBaseUrl() );
+            try {
+                secondaryServerServiceInstance = createServerService(SettingsHelper.getInstance(context).getSecondaryBaseUrl());
+            } catch (Exception e) {
+                // Here we can go if the secondary base URL is invalid
+                // In this case, just return a copy of the primary instance
+                secondaryServerServiceInstance = getServerServiceInstance(context);
+            }
         }
 
         return secondaryServerServiceInstance;
     }
 
-    private static ServerService createServerService( String baseUrl ) {
+    // Made public for downloading from third party servers
+    public static ServerService createServerService( String baseUrl ) {
         return createBuilder( baseUrl ).build().create( ServerService.class );
     }
 
     private static Retrofit.Builder createBuilder( String baseUrl ) {
         Retrofit.Builder builder = new Retrofit.Builder();
-        OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder().
-                connectTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS ).
-                readTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS ).
-                writeTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS );
 
-        builder.client( clientBuilder.build() );
+        if (BuildConfig.TRUST_ANY_CERTIFICATE) {
+            builder.client(UnsafeOkHttpClient.getUnsafeOkHttpClient());
+        } else {
+            OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder().
+                    connectTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS ).
+                    readTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS ).
+                    writeTimeout( Const.CONNECTION_TIMEOUT, TimeUnit.MILLISECONDS );
+            builder.client(clientBuilder.build());
+        }
 
         builder.baseUrl( baseUrl )
                 .addConverterFactory( JacksonConverterFactory.create( new ObjectMapper()) );

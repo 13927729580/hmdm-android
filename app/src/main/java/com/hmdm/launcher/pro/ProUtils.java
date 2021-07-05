@@ -41,6 +41,10 @@ public class ProUtils {
         // Stub
     }
 
+    public static void sendExceptionToCrashlytics(Throwable e) {
+        // Stub
+    }
+
     // Start the service checking if the foreground app is allowed to the user (by usage statistics)
     public static boolean checkAccessibilityService(Context context) {
         // Stub
@@ -81,7 +85,7 @@ public class ProUtils {
     }
 
     // Start COSU kiosk mode
-    public static boolean startCosuKioskMode(String kioskApp, Activity activity) {
+    public static boolean startCosuKioskMode(String kioskApp, Activity activity, boolean enableSettings) {
         // Stub
         return false;
     }

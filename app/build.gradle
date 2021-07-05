@@ -30,26 +30,53 @@ repositories {
 }
 
 android {
-    compileSdkVersion 28
-    buildToolsVersion "28.0.3"
+    compileSdkVersion 30
+    buildToolsVersion "30.0.1"
     defaultConfig {
         applicationId "com.hmdm.launcher"
-        minSdkVersion 14
+        minSdkVersion 16
         targetSdkVersion 28
-        versionCode 78
-        versionName "3.08"
+        versionCode 202
+        versionName "4.02"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         dataBinding {
             enabled = true
         }
         multiDexEnabled true
 
-        buildConfigField("String", "BASE_URL", "\"http://app.h-mdm.com\"")
-        buildConfigField("String", "SECONDARY_BASE_URL", "\"http://app.h-mdm.com\"")
+        // Default URL of the web panel (scheme + host!)
+        buildConfigField("String", "BASE_URL", "\"https://app.h-mdm.com\"")
+        // URL of the secondary address of your web panel, called when the primary host is not available.
+        // Could be equal to the BASE_URL parameter
+        buildConfigField("String", "SECONDARY_BASE_URL", "\"https://app.h-mdm.com\"")
+        // Relative path of the web panel on the server. Keep it empty if installed in the root
         buildConfigField("String", "SERVER_PROJECT", "\"\"")
-        buildConfigField("Boolean", "SUGGEST_IMEI_AS_ID", "false")
+        // This parameter manages how the device ID should be set up at first start
+        // "user" - user enters it manually
+        // "suggest" - user can select among few predefined values (IMEI, serial, MAC)
+        // "imei", "serial", "mac" - set the selected parameter as device ID without user interaction
+        buildConfigField("String", "DEVICE_ID_CHOICE", "\"user\"")
+        // Enables Push notifications. Setting it to false will stop automatic configuration updates after changing it on the server.
         buildConfigField("Boolean", "ENABLE_PUSH", "true")
+        // MQTT port for Push notifications
         buildConfigField("Integer", "MQTT_PORT", "31000")
+        // Set this parameter to true if you'll grant system privileges to Headwind MDM (signing it by system keys).
+        // This will enable silent installation and the launcher will try to get the device owner rights by updating system files.
+        // This may be useful, for example, when your device doesn't have QR code provisioning capability.
+        buildConfigField("Boolean", "SYSTEM_PRIVILEGES", "false")
+        // Set this parameter to true if you'd like to trust every certificate, for example, self-signed
+        // Not recommended for security purposes!
+        buildConfigField("Boolean", "TRUST_ANY_CERTIFICATE", "false")
+        // A shared secret to sign server config requests
+        buildConfigField("String", "REQUEST_SIGNATURE", "\"12345\"")
+        // Set this parameter to true if the server signature should be checked
+        // (additional protection against Man-In-The-Middle attacks)
+        buildConfigField("Boolean", "CHECK_SIGNATURE", "false")
+        // ANR watchdog flag (for testing purposes only as this watchdog may drain the resources!)
+        buildConfigField("Boolean", "ANR_WATCHDOG", "false")
+        // If set to true, the server URL will be requested in UI in non-MDM mode even if it is hardcoded in build.gradle
+        // See the related "if" statement in MainActivity.java
+        buildConfigField("Boolean", "REQUEST_SERVER_URL", "false")
     }
     buildTypes {
         release {
@@ -61,6 +88,11 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
     }
 
     packagingOptions {
@@ -82,10 +114,11 @@ dependencies {
     androidTestImplementation('androidx.test.espresso:espresso-core:3.1.0', {
         exclude group: 'com.android.support', module: 'support-annotations'
     })
-    implementation 'androidx.appcompat:appcompat:1.0.0'
+    implementation 'androidx.appcompat:appcompat:1.1.0'
     testImplementation 'junit:junit:4.12'
-    implementation 'androidx.recyclerview:recyclerview:1.0.0'
-    implementation 'com.google.android.material:material:1.0.0'
+    implementation 'androidx.recyclerview:recyclerview:1.1.0'
+    implementation 'com.google.android.material:material:1.1.0'
+    implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.0.0'
 
     // MQTT messaging
     implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.0'
@@ -104,5 +137,9 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.9.4'
 
     // Worker
-    implementation 'androidx.work:work-runtime:2.2.0'
+    implementation 'androidx.work:work-runtime:2.5.0'
+
+    implementation('com.journeyapps:zxing-android-embedded:4.1.0') { transitive = false }
+    implementation 'com.google.zxing:core:3.3.0'
+    implementation group: 'commons-io', name: 'commons-io', version: '2.0.1'
 }

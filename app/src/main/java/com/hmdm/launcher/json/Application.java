@@ -32,12 +32,17 @@ public class Application {
     private String pkg;
     private String version;
     private String url;
+    private boolean useKiosk;
     private boolean showIcon;
     private boolean remove;
     private boolean runAfterInstall;
+    private boolean runAtBoot;
     private boolean skipVersion;
     private String iconText;
     private String icon;
+    private Integer screenOrder;
+    private Integer keyCode;
+    private boolean bottom;
 
     public Application() {}
 
@@ -81,6 +86,14 @@ public class Application {
         this.url = url;
     }
 
+    public boolean isUseKiosk() {
+        return useKiosk;
+    }
+
+    public void setUseKiosk(boolean useKiosk) {
+        this.useKiosk = useKiosk;
+    }
+
     public boolean isShowIcon() {
         return showIcon;
     }
@@ -105,6 +118,14 @@ public class Application {
         this.runAfterInstall = runAfterInstall;
     }
 
+    public boolean isRunAtBoot() {
+        return runAtBoot;
+    }
+
+    public void setRunAtBoot(boolean runAtBoot) {
+        this.runAtBoot = runAtBoot;
+    }
+
     public boolean isSkipVersion() {
         return skipVersion;
     }
@@ -127,5 +148,29 @@ public class Application {
 
     public void setIcon(String icon) {
         this.icon = icon;
+    }
+
+    public Integer getScreenOrder() {
+        return screenOrder;
+    }
+
+    public void setScreenOrder(Integer screenOrder) {
+        this.screenOrder = screenOrder;
+    }
+
+    public Integer getKeyCode() {
+        return keyCode;
+    }
+
+    public void setKeyCode(Integer keyCode) {
+        this.keyCode = keyCode;
+    }
+
+    public boolean isBottom() {
+        return bottom;
+    }
+
+    public void setBottom(boolean bottom) {
+        this.bottom = bottom;
     }
 }

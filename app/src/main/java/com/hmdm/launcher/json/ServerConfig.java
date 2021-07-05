@@ -27,6 +27,8 @@ import java.util.List;
 @JsonIgnoreProperties( ignoreUnknown = true )
 public class ServerConfig {
 
+    private String newNumber;
+
     private String backgroundColor;
     private String textColor;
     private String backgroundImageUrl;
@@ -50,13 +52,55 @@ public class ServerConfig {
     private String systemUpdateTo;
 
     private Boolean factoryReset;
+    private Boolean reboot;
+    private Boolean lock;
+    private String lockMessage;
+    private String passwordReset;
 
     private String pushOptions;
+    private Integer keepaliveTime;
     private String requestUpdates;
 
-    private List< Application > applications = new LinkedList();
+    private Boolean usbStorage;
+    private Boolean autoBrightness;
+    private Integer brightness;
+    private Boolean manageTimeout;
+    private Integer timeout;
+    private Boolean lockVolume;
+    private Boolean manageVolume;
+    private Integer volume;
+    private String passwordMode;
+    private String timeZone;
+    private String allowedClasses;
 
-    private List< ApplicationSetting > applicationSettings = new LinkedList();
+    private Integer orientation;
+    private Boolean kioskHome;
+    private Boolean kioskRecents;
+    private Boolean kioskNotifications;
+    private Boolean kioskSystemInfo;
+    private Boolean kioskKeyguard;
+    private String restrictions;
+
+    private String custom1;
+    private String custom2;
+    private String custom3;
+
+    private Boolean runDefaultLauncher;
+
+    private String newServerUrl;
+
+    private boolean lockSafeSettings;
+    private boolean disableScreenshots;
+
+    private boolean showWifi;
+
+    private List<Application> applications = new LinkedList();
+
+    private List<ApplicationSetting> applicationSettings = new LinkedList();
+
+    private List<RemoteFile> files = new LinkedList();
+
+    private List<Action> actions = new LinkedList();
 
     public static final String TITLE_NONE = "none";
     public static final String TITLE_DEVICE_ID = "deviceId";
@@ -72,6 +116,14 @@ public class ServerConfig {
     public static final String PUSH_OPTIONS_POLLING = "polling";
 
     public ServerConfig() {}
+
+    public String getNewNumber() {
+        return newNumber;
+    }
+
+    public void setNewNumber(String newNumber) {
+        this.newNumber = newNumber;
+    }
 
     public String getBackgroundColor() {
         return backgroundColor;
@@ -176,6 +228,7 @@ public class ServerConfig {
     public void setWifi(Boolean wifi) {
         this.wifi = wifi;
     }
+
     public Boolean getMobileData() {
         return mobileData;
     }
@@ -240,6 +293,38 @@ public class ServerConfig {
         this.factoryReset = factoryReset;
     }
 
+    public Boolean getReboot() {
+        return reboot;
+    }
+
+    public void setReboot(Boolean reboot) {
+        this.reboot = reboot;
+    }
+
+    public Boolean getLock() {
+        return lock;
+    }
+
+    public void setLock(Boolean lock) {
+        this.lock = lock;
+    }
+
+    public String getLockMessage() {
+        return lockMessage;
+    }
+
+    public void setLockMessage(String lockMessage) {
+        this.lockMessage = lockMessage;
+    }
+
+    public String getPasswordReset() {
+        return passwordReset;
+    }
+
+    public void setPasswordReset(String passwordReset) {
+        this.passwordReset = passwordReset;
+    }
+
     public String getPushOptions() {
         return pushOptions;
     }
@@ -248,11 +333,243 @@ public class ServerConfig {
         this.pushOptions = pushOptions;
     }
 
+    public Integer getKeepaliveTime() {
+        return keepaliveTime;
+    }
+
+    public void setKeepaliveTime(Integer keepaliveTime) {
+        this.keepaliveTime = keepaliveTime;
+    }
+
     public String getRequestUpdates() {
         return requestUpdates;
     }
 
     public void setRequestUpdates(String requestUpdates) {
         this.requestUpdates = requestUpdates;
+    }
+
+    public Boolean getUsbStorage() {
+        return usbStorage;
+    }
+
+    public void setUsbStorage(Boolean usbStorage) {
+        this.usbStorage = usbStorage;
+    }
+
+    public Boolean getAutoBrightness() {
+        return autoBrightness;
+    }
+
+    public void setAutoBrightness(Boolean autoBrightness) {
+        this.autoBrightness = autoBrightness;
+    }
+
+    public Integer getBrightness() {
+        return brightness;
+    }
+
+    public void setBrightness(Integer brightness) {
+        this.brightness = brightness;
+    }
+
+    public Boolean getManageTimeout() {
+        return manageTimeout;
+    }
+
+    public void setManageTimeout(Boolean manageTimeout) {
+        this.manageTimeout = manageTimeout;
+    }
+
+    public Integer getTimeout() {
+        return timeout;
+    }
+
+    public void setTimeout(Integer timeout) {
+        this.timeout = timeout;
+    }
+
+    public Boolean getLockVolume() {
+        return lockVolume;
+    }
+
+    public void setLockVolume(Boolean lockVolume) {
+        this.lockVolume = lockVolume;
+    }
+
+    public Boolean getManageVolume() {
+        return manageVolume;
+    }
+
+    public void setManageVolume(Boolean manageVolume) {
+        this.manageVolume = manageVolume;
+    }
+
+    public Integer getVolume() {
+        return volume;
+    }
+
+    public void setVolume(Integer volume) {
+        this.volume = volume;
+    }
+
+    public String getPasswordMode() {
+        return passwordMode;
+    }
+
+    public void setPasswordMode(String passwordMode) {
+        this.passwordMode = passwordMode;
+    }
+
+    public String getTimeZone() {
+        return timeZone;
+    }
+
+    public void setTimeZone(String timeZone) {
+        this.timeZone = timeZone;
+    }
+
+    public String getAllowedClasses() {
+        return allowedClasses;
+    }
+
+    public void setAllowedClasses(String allowedClasses) {
+        this.allowedClasses = allowedClasses;
+    }
+
+    public Integer getOrientation() {
+        return orientation;
+    }
+
+    public void setOrientation(Integer orientation) {
+        this.orientation = orientation;
+    }
+
+    public Boolean getKioskHome() {
+        return kioskHome;
+    }
+
+    public void setKioskHome(Boolean kioskHome) {
+        this.kioskHome = kioskHome;
+    }
+
+    public Boolean getKioskRecents() {
+        return kioskRecents;
+    }
+
+    public void setKioskRecents(Boolean kioskRecents) {
+        this.kioskRecents = kioskRecents;
+    }
+
+    public Boolean getKioskNotifications() {
+        return kioskNotifications;
+    }
+
+    public void setKioskNotifications(Boolean kioskNotifications) {
+        this.kioskNotifications = kioskNotifications;
+    }
+
+    public Boolean getKioskSystemInfo() {
+        return kioskSystemInfo;
+    }
+
+    public void setKioskSystemInfo(Boolean kioskSystemInfo) {
+        this.kioskSystemInfo = kioskSystemInfo;
+    }
+
+    public Boolean getKioskKeyguard() {
+        return kioskKeyguard;
+    }
+
+    public void setKioskKeyguard(Boolean kioskKeyguard) {
+        this.kioskKeyguard = kioskKeyguard;
+    }
+
+    public Boolean getRunDefaultLauncher() {
+        return runDefaultLauncher;
+    }
+
+    public void setRunDefaultLauncher(Boolean runDefaultLauncher) {
+        this.runDefaultLauncher = runDefaultLauncher;
+    }
+
+    public String getNewServerUrl() {
+        return newServerUrl;
+    }
+
+    public void setNewServerUrl(String newServerUrl) {
+        this.newServerUrl = newServerUrl;
+    }
+
+    public boolean isLockSafeSettings() {
+        return lockSafeSettings;
+    }
+
+    public void setLockSafeSettings(boolean lockSafeSettings) {
+        this.lockSafeSettings = lockSafeSettings;
+    }
+
+    public boolean isDisableScreenshots() {
+        return disableScreenshots;
+    }
+
+    public void setDisableScreenshots(boolean disableScreenshots) {
+        this.disableScreenshots = disableScreenshots;
+    }
+
+    public boolean isShowWifi() {
+        return showWifi;
+    }
+
+    public void setShowWifi(boolean showWifi) {
+        this.showWifi = showWifi;
+    }
+
+    public String getRestrictions() {
+        return restrictions;
+    }
+
+    public void setRestrictions(String restrictions) {
+        this.restrictions = restrictions;
+    }
+
+    public String getCustom1() {
+        return custom1;
+    }
+
+    public void setCustom1(String custom1) {
+        this.custom1 = custom1;
+    }
+
+    public String getCustom2() {
+        return custom2;
+    }
+
+    public void setCustom2(String custom2) {
+        this.custom2 = custom2;
+    }
+
+    public String getCustom3() {
+        return custom3;
+    }
+
+    public void setCustom3(String custom3) {
+        this.custom3 = custom3;
+    }
+
+    public List<RemoteFile> getFiles() {
+        return files;
+    }
+
+    public void setFiles(List<RemoteFile> files) {
+        this.files = files;
+    }
+
+    public List<Action> getActions() {
+        return actions;
+    }
+
+    public void setActions(List<Action> actions) {
+        this.actions = actions;
     }
 }
